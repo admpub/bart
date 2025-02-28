@@ -22,8 +22,8 @@ import (
 	"iter"
 	"net/netip"
 
-	"github.com/gaissmai/bart/internal/art"
-	"github.com/gaissmai/bart/internal/lpmbt"
+	"github.com/admpub/bart/internal/art"
+	"github.com/admpub/bart/internal/lpmbt"
 )
 
 // Table is an IPv4 and IPv6 routing table with payload V.

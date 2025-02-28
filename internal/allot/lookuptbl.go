@@ -3,7 +3,7 @@
 
 package allot
 
-import "github.com/gaissmai/bart/internal/bitset"
+import "github.com/admpub/bart/internal/bitset"
 
 // LookupTbl, as precalculated bitsets,
 // map the baseIndex to bitset with precomputed complete binary tree.

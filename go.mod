@@ -1,3 +1,3 @@
-module github.com/gaissmai/bart
+module github.com/admpub/bart
 
 go 1.23.6

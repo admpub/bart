@@ -13,7 +13,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/gaissmai/bart/internal/art"
+	"github.com/admpub/bart/internal/art"
 )
 
 // DumpListNode contains CIDR, Value and Subnets, representing the trie

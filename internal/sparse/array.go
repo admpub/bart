@@ -6,7 +6,7 @@
 package sparse
 
 import (
-	"github.com/gaissmai/bart/internal/bitset"
+	"github.com/admpub/bart/internal/bitset"
 )
 
 // Array, a generic implementation of a sparse array

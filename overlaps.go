@@ -3,9 +3,9 @@ package bart
 import (
 	"net/netip"
 
-	"github.com/gaissmai/bart/internal/allot"
-	"github.com/gaissmai/bart/internal/art"
-	"github.com/gaissmai/bart/internal/bitset"
+	"github.com/admpub/bart/internal/allot"
+	"github.com/admpub/bart/internal/art"
+	"github.com/admpub/bart/internal/bitset"
 )
 
 // overlaps returns true if any IP in the nodes n or o overlaps.

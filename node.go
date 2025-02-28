@@ -7,9 +7,9 @@ import (
 	"net/netip"
 	"slices"
 
-	"github.com/gaissmai/bart/internal/art"
-	"github.com/gaissmai/bart/internal/lpmbt"
-	"github.com/gaissmai/bart/internal/sparse"
+	"github.com/admpub/bart/internal/art"
+	"github.com/admpub/bart/internal/lpmbt"
+	"github.com/admpub/bart/internal/sparse"
 )
 
 const (

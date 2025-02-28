@@ -8,7 +8,7 @@ import (
 	"net/netip"
 	"os"
 
-	"github.com/gaissmai/bart"
+	"github.com/admpub/bart"
 )
 
 func ExampleTable_Contains() {

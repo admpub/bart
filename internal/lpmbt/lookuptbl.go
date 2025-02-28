@@ -1,7 +1,7 @@
 // package lpmbt contains the backtracking lookup table for longest-prefix-match.
 package lpmbt
 
-import "github.com/gaissmai/bart/internal/bitset"
+import "github.com/admpub/bart/internal/bitset"
 
 // LookupTbl is the backtracking sequence in the complete binary tree
 // of the prefixes (mapped by the base_index function) as bitstring.
