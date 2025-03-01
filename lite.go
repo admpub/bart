@@ -6,10 +6,10 @@ package bart
 import (
 	"net/netip"
 
-	"github.com/gaissmai/bart/internal/art"
-	"github.com/gaissmai/bart/internal/bitset"
-	"github.com/gaissmai/bart/internal/lpmbt"
-	"github.com/gaissmai/bart/internal/sparse"
+	"github.com/admpub/bart/internal/art"
+	"github.com/admpub/bart/internal/bitset"
+	"github.com/admpub/bart/internal/lpmbt"
+	"github.com/admpub/bart/internal/sparse"
 )
 
 // Lite is the little sister of [Table]. Lite is ideal for simple
