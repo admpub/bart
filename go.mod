@@ -1,3 +1,3 @@
 module github.com/admpub/bart
 
-go 1.23.6
+go 1.23

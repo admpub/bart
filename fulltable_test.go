@@ -12,7 +12,6 @@ import (
 	"net/netip"
 	"os"
 	"runtime"
-	"strconv"
 	"strings"
 	"testing"
 )
@@ -29,6 +28,16 @@ var (
 
 	randRoute4 route
 	randRoute6 route
+
+	matchIP4  netip.Addr
+	matchIP6  netip.Addr
+	matchPfx4 netip.Prefix
+	matchPfx6 netip.Prefix
+
+	missIP4  netip.Addr
+	missIP6  netip.Addr
+	missPfx4 netip.Prefix
+	missPfx6 netip.Prefix
 )
 
 type route struct {
@@ -45,219 +54,242 @@ func init() {
 
 var (
 	intSink  int
-	okSink   bool
 	boolSink bool
 )
 
-func BenchmarkFullMatchV4(b *testing.B) {
-	var rt Table[int]
+func init() {
+	lt := new(Lite)
 
-	for i, route := range routes {
-		rt.Insert(route.CIDR, i)
+	for _, route := range routes {
+		lt.Insert(route.CIDR)
 	}
 
-	var ip netip.Addr
-	var ipAsPfx netip.Prefix
-
-	// find a random match
+	// find a random match IP4 and IP6
 	for {
-		ip = randomIP4()
-		_, ok := rt.Lookup(ip)
-		if ok {
-			ipAsPfx, _ = ip.Prefix(ip.BitLen())
+		matchIP4 = randomRealWorldPrefixes4(1)[0].Addr().Next()
+		if ok := lt.Contains(matchIP4); ok {
+			break
+		}
+	}
+	for {
+		matchIP6 = randomRealWorldPrefixes6(1)[0].Addr().Next()
+		if ok := lt.Contains(matchIP6); ok {
 			break
 		}
 	}
 
+	// find a random match Pfx4
+	for {
+		matchPfx4 = randomRealWorldPrefixes4(1)[0]
+		if _, ok := lt.LookupPrefix(matchPfx4); ok {
+			break
+		}
+	}
+	for {
+		matchPfx6 = randomRealWorldPrefixes6(1)[0]
+		if _, ok := lt.LookupPrefix(matchPfx6); ok {
+			break
+		}
+	}
+
+	for {
+		missIP4 = randomRealWorldPrefixes4(1)[0].Addr().Next()
+		if ok := lt.Contains(missIP4); !ok {
+			break
+		}
+	}
+	for {
+		missIP6 = randomRealWorldPrefixes6(1)[0].Addr().Next()
+		if ok := lt.Contains(missIP6); !ok {
+			break
+		}
+	}
+
+	for {
+		missPfx4 = randomRealWorldPrefixes4(1)[0]
+		if _, ok := lt.LookupPrefix(missPfx4); !ok {
+			break
+		}
+	}
+	for {
+		missPfx6 = randomRealWorldPrefixes6(1)[0]
+		if _, ok := lt.LookupPrefix(missPfx6); !ok {
+			break
+		}
+	}
+}
+
+func BenchmarkFullMatch4(b *testing.B) {
+	rt := new(Table[struct{}])
+
+	for _, route := range routes {
+		rt.Insert(route.CIDR, struct{}{})
+	}
+
+	b.Log(matchIP4)
+	b.Log(matchPfx4)
+
 	b.Run("Contains", func(b *testing.B) {
 		b.ResetTimer()
 		for range b.N {
-			okSink = rt.Contains(ip)
+			boolSink = rt.Contains(matchIP4)
 		}
 	})
 
 	b.Run("Lookup", func(b *testing.B) {
 		b.ResetTimer()
 		for range b.N {
-			intSink, okSink = rt.Lookup(ip)
+			_, boolSink = rt.Lookup(matchIP4)
 		}
 	})
 
 	b.Run("LookupPrefix", func(b *testing.B) {
 		b.ResetTimer()
 		for range b.N {
-			intSink, okSink = rt.LookupPrefix(ipAsPfx)
+			_, boolSink = rt.LookupPrefix(matchPfx4)
 		}
 	})
 
-	b.Run("LookupPrefixLPM", func(b *testing.B) {
+	b.Run("LookupPfxLPM", func(b *testing.B) {
 		b.ResetTimer()
 		for range b.N {
-			_, intSink, okSink = rt.LookupPrefixLPM(ipAsPfx)
+			_, _, boolSink = rt.LookupPrefixLPM(matchPfx4)
 		}
 	})
 }
 
-func BenchmarkFullMatchV6(b *testing.B) {
-	var rt Table[int]
+func BenchmarkFullMatch6(b *testing.B) {
+	rt := new(Table[struct{}])
 
-	for i, route := range routes {
-		rt.Insert(route.CIDR, i)
+	for _, route := range routes {
+		rt.Insert(route.CIDR, struct{}{})
 	}
 
-	var ip netip.Addr
-	var ipAsPfx netip.Prefix
-
-	// find a random match
-	for {
-		ip = randomIP6()
-		_, ok := rt.Lookup(ip)
-		if ok {
-			ipAsPfx, _ = ip.Prefix(ip.BitLen())
-			break
-		}
-	}
+	b.Log(matchIP6)
+	b.Log(matchPfx6)
 
 	b.Run("Contains", func(b *testing.B) {
 		b.ResetTimer()
 		for range b.N {
-			okSink = rt.Contains(ip)
+			boolSink = rt.Contains(matchIP6)
 		}
 	})
 
 	b.Run("Lookup", func(b *testing.B) {
 		b.ResetTimer()
 		for range b.N {
-			intSink, okSink = rt.Lookup(ip)
+			_, boolSink = rt.Lookup(matchIP6)
 		}
 	})
 
 	b.Run("LookupPrefix", func(b *testing.B) {
 		b.ResetTimer()
 		for range b.N {
-			intSink, okSink = rt.LookupPrefix(ipAsPfx)
+			_, boolSink = rt.LookupPrefix(matchPfx6)
 		}
 	})
 
-	b.Run("LookupPrefixLPM", func(b *testing.B) {
+	b.Run("LookupPfxLPM", func(b *testing.B) {
 		b.ResetTimer()
 		for range b.N {
-			_, intSink, okSink = rt.LookupPrefixLPM(ipAsPfx)
+			_, _, boolSink = rt.LookupPrefixLPM(matchPfx6)
 		}
 	})
 }
 
-func BenchmarkFullMissV4(b *testing.B) {
-	var rt Table[int]
+func BenchmarkFullMiss4(b *testing.B) {
+	rt := new(Table[int])
 
 	for i, route := range routes {
 		rt.Insert(route.CIDR, i)
 	}
 
-	var ip netip.Addr
-	var ipAsPfx netip.Prefix
-
-	// find a random miss
-	for {
-		ip = randomIP4()
-		_, ok := rt.Lookup(ip)
-		if !ok {
-			ipAsPfx, _ = ip.Prefix(ip.BitLen())
-			break
-		}
-	}
+	b.Log(missIP4)
+	b.Log(missPfx4)
 
 	b.Run("Contains", func(b *testing.B) {
 		b.ResetTimer()
 		for range b.N {
-			okSink = rt.Contains(ip)
+			boolSink = rt.Contains(missIP4)
 		}
 	})
 
 	b.Run("Lookup", func(b *testing.B) {
 		b.ResetTimer()
 		for range b.N {
-			intSink, okSink = rt.Lookup(ip)
+			intSink, boolSink = rt.Lookup(missIP4)
 		}
 	})
 
 	b.Run("LookupPrefix", func(b *testing.B) {
 		b.ResetTimer()
 		for range b.N {
-			intSink, okSink = rt.LookupPrefix(ipAsPfx)
+			intSink, boolSink = rt.LookupPrefix(missPfx4)
 		}
 	})
 
-	b.Run("LookupPrefixLPM", func(b *testing.B) {
+	b.Run("LookupPfxLPM", func(b *testing.B) {
 		b.ResetTimer()
 		for range b.N {
-			_, intSink, okSink = rt.LookupPrefixLPM(ipAsPfx)
+			_, intSink, boolSink = rt.LookupPrefixLPM(missPfx4)
 		}
 	})
 }
 
-func BenchmarkFullMissV6(b *testing.B) {
-	var rt Table[int]
+func BenchmarkFullMiss6(b *testing.B) {
+	rt := new(Table[int])
 
 	for i, route := range routes {
 		rt.Insert(route.CIDR, i)
 	}
 
-	var ip netip.Addr
-	var ipAsPfx netip.Prefix
-
-	// find a random miss
-	for {
-		ip = randomIP6()
-		_, ok := rt.Lookup(ip)
-		if !ok {
-			ipAsPfx, _ = ip.Prefix(ip.BitLen())
-			break
-		}
-	}
+	b.Log(missIP6)
+	b.Log(missPfx6)
 
 	b.Run("Contains", func(b *testing.B) {
 		b.ResetTimer()
 		for range b.N {
-			okSink = rt.Contains(ip)
+			boolSink = rt.Contains(missIP6)
 		}
 	})
 
 	b.Run("Lookup", func(b *testing.B) {
 		b.ResetTimer()
 		for range b.N {
-			intSink, okSink = rt.Lookup(ip)
+			intSink, boolSink = rt.Lookup(missIP6)
 		}
 	})
 
 	b.Run("LookupPrefix", func(b *testing.B) {
 		b.ResetTimer()
 		for range b.N {
-			intSink, okSink = rt.LookupPrefix(ipAsPfx)
+			intSink, boolSink = rt.LookupPrefix(missPfx6)
 		}
 	})
 
-	b.Run("LookupPrefixLPM", func(b *testing.B) {
+	b.Run("LookupPfxLPM", func(b *testing.B) {
 		b.ResetTimer()
 		for range b.N {
-			_, intSink, okSink = rt.LookupPrefixLPM(ipAsPfx)
+			_, intSink, boolSink = rt.LookupPrefixLPM(missPfx6)
 		}
 	})
 }
 
-func BenchmarkFullTableOverlapsV4(b *testing.B) {
-	var rt Table[int]
+func BenchmarkFullTableOverlaps4(b *testing.B) {
+	rt := new(Table[int])
 
 	for i, route := range routes4 {
 		rt.Insert(route.CIDR, i)
 	}
+
+	b.Log(missIP4)
+	b.Log(missPfx4)
 
 	for i := 1; i <= 1<<20; i *= 2 {
 		rt2 := new(Table[int])
 		for j, pfx := range randomRealWorldPrefixes4(i) {
 			rt2.Insert(pfx, j)
 		}
-		b.Log(rt2.String())
 
 		b.Run(fmt.Sprintf("With_%4d", i), func(b *testing.B) {
 			b.ResetTimer()
@@ -268,8 +300,8 @@ func BenchmarkFullTableOverlapsV4(b *testing.B) {
 	}
 }
 
-func BenchmarkFullTableOverlapsV6(b *testing.B) {
-	var rt Table[int]
+func BenchmarkFullTableOverlaps6(b *testing.B) {
+	rt := new(Table[int])
 
 	for i, route := range routes6 {
 		rt.Insert(route.CIDR, i)
@@ -280,7 +312,6 @@ func BenchmarkFullTableOverlapsV6(b *testing.B) {
 		for j, pfx := range randomRealWorldPrefixes6(i) {
 			rt2.Insert(pfx, j)
 		}
-		b.Log(rt2.String())
 
 		b.Run(fmt.Sprintf("With_%4d", i), func(b *testing.B) {
 			b.ResetTimer()
@@ -292,7 +323,7 @@ func BenchmarkFullTableOverlapsV6(b *testing.B) {
 }
 
 func BenchmarkFullTableOverlapsPrefix(b *testing.B) {
-	var rt Table[int]
+	rt := new(Table[int])
 
 	for i, route := range routes {
 		rt.Insert(route.CIDR, i)
@@ -307,7 +338,7 @@ func BenchmarkFullTableOverlapsPrefix(b *testing.B) {
 }
 
 func BenchmarkFullTableClone(b *testing.B) {
-	var rt4 Table[int]
+	rt4 := new(Table[int])
 
 	for i, route := range routes4 {
 		rt4.Insert(route.CIDR, i)
@@ -320,7 +351,7 @@ func BenchmarkFullTableClone(b *testing.B) {
 		}
 	})
 
-	var rt6 Table[int]
+	rt6 := new(Table[int])
 
 	for i, route := range routes6 {
 		rt6.Insert(route.CIDR, i)
@@ -333,7 +364,7 @@ func BenchmarkFullTableClone(b *testing.B) {
 		}
 	})
 
-	var rt Table[int]
+	rt := new(Table[int])
 
 	for i, route := range routes {
 		rt.Insert(route.CIDR, i)
@@ -347,14 +378,14 @@ func BenchmarkFullTableClone(b *testing.B) {
 	})
 }
 
-func BenchmarkFullTableMemoryV4(b *testing.B) {
+func BenchmarkFullTableMemory4(b *testing.B) {
 	var startMem, endMem runtime.MemStats
 
 	rt := new(Table[struct{}])
 	runtime.GC()
 	runtime.ReadMemStats(&startMem)
 
-	b.Run(strconv.Itoa(len(routes4)), func(b *testing.B) {
+	b.Run(fmt.Sprintf("Table[]: %d", len(routes4)), func(b *testing.B) {
 		for range b.N {
 			for _, route := range routes4 {
 				rt.Insert(route.CIDR, struct{}{})
@@ -365,23 +396,23 @@ func BenchmarkFullTableMemoryV4(b *testing.B) {
 		runtime.ReadMemStats(&endMem)
 
 		stats := rt.root4.nodeStatsRec()
-		b.ReportMetric(float64(endMem.HeapAlloc-startMem.HeapAlloc), "Bytes")
-		b.ReportMetric(float64(rt.Size()), "size")
-		b.ReportMetric(float64(stats.pfxs), "pfxs")
-		b.ReportMetric(float64(stats.nodes), "nodes")
-		b.ReportMetric(float64(stats.leaves), "leaves")
+		b.ReportMetric(float64(endMem.HeapAlloc-startMem.HeapAlloc)/1024, "KByte")
+		b.ReportMetric(float64(stats.pfxs), "pfx")
+		b.ReportMetric(float64(stats.nodes), "node")
+		b.ReportMetric(float64(stats.leaves), "leave")
+		b.ReportMetric(float64(stats.fringes), "fringe")
 		b.ReportMetric(0, "ns/op")
 	})
 }
 
-func BenchmarkFullTableMemoryV6(b *testing.B) {
+func BenchmarkFullTableMemory6(b *testing.B) {
 	var startMem, endMem runtime.MemStats
 
 	rt := new(Table[struct{}])
 	runtime.GC()
 	runtime.ReadMemStats(&startMem)
 
-	b.Run(strconv.Itoa(len(routes6)), func(b *testing.B) {
+	b.Run(fmt.Sprintf("Table[]: %d", len(routes6)), func(b *testing.B) {
 		for range b.N {
 			for _, route := range routes6 {
 				rt.Insert(route.CIDR, struct{}{})
@@ -392,11 +423,11 @@ func BenchmarkFullTableMemoryV6(b *testing.B) {
 		runtime.ReadMemStats(&endMem)
 
 		stats := rt.root6.nodeStatsRec()
-		b.ReportMetric(float64(endMem.HeapAlloc-startMem.HeapAlloc), "Bytes")
-		b.ReportMetric(float64(rt.Size()), "size")
-		b.ReportMetric(float64(stats.pfxs), "pfxs")
-		b.ReportMetric(float64(stats.nodes), "nodes")
-		b.ReportMetric(float64(stats.leaves), "leaves")
+		b.ReportMetric(float64(endMem.HeapAlloc-startMem.HeapAlloc)/1024, "KByte")
+		b.ReportMetric(float64(stats.pfxs), "pfx")
+		b.ReportMetric(float64(stats.nodes), "node")
+		b.ReportMetric(float64(stats.leaves), "leave")
+		b.ReportMetric(float64(stats.fringes), "fringe")
 		b.ReportMetric(0, "ns/op")
 	})
 }
@@ -408,7 +439,7 @@ func BenchmarkFullTableMemory(b *testing.B) {
 	runtime.GC()
 	runtime.ReadMemStats(&startMem)
 
-	b.Run(strconv.Itoa(len(routes)), func(b *testing.B) {
+	b.Run(fmt.Sprintf("Table[]: %d", len(routes)), func(b *testing.B) {
 		for range b.N {
 			for _, route := range routes {
 				rt.Insert(route.CIDR, struct{}{})
@@ -420,13 +451,19 @@ func BenchmarkFullTableMemory(b *testing.B) {
 
 		s4 := rt.root4.nodeStatsRec()
 		s6 := rt.root6.nodeStatsRec()
-		stats := stats{s4.pfxs + s6.pfxs, s4.childs + s6.childs, s4.nodes + s6.nodes, s4.leaves + s6.leaves}
+		stats := stats{
+			s4.pfxs + s6.pfxs,
+			s4.childs + s6.childs,
+			s4.nodes + s6.nodes,
+			s4.leaves + s6.leaves,
+			s4.fringes + s6.fringes,
+		}
 
-		b.ReportMetric(float64(endMem.HeapAlloc-startMem.HeapAlloc), "Bytes")
-		b.ReportMetric(float64(rt.Size()), "size")
-		b.ReportMetric(float64(stats.pfxs), "pfxs")
-		b.ReportMetric(float64(stats.nodes), "nodes")
-		b.ReportMetric(float64(stats.leaves), "leaves")
+		b.ReportMetric(float64(endMem.HeapAlloc-startMem.HeapAlloc)/1024, "KByte")
+		b.ReportMetric(float64(stats.pfxs), "pfx")
+		b.ReportMetric(float64(stats.nodes), "node")
+		b.ReportMetric(float64(stats.leaves), "leave")
+		b.ReportMetric(float64(stats.fringes), "fringe")
 		b.ReportMetric(0, "ns/op")
 	})
 }
@@ -474,7 +511,7 @@ func randomRealWorldPrefixes4(n int) []netip.Prefix {
 		pfx := randomPrefix4()
 
 		// skip too small or too big masks
-		if pfx.Bits() < 8 && pfx.Bits() > 28 {
+		if pfx.Bits() < 8 || pfx.Bits() > 28 {
 			continue
 		}
 

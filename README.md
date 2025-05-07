@@ -13,29 +13,42 @@
 
 `package bart` provides a Balanced-Routing-Table (BART).
 
-BART is balanced in terms of memory usage and lookup time
-for the longest-prefix match.
+BART is balanced in terms of memory usage and lookup time for the longest-prefix
+match.
 
-BART is a multibit-trie with fixed stride length of 8 bits,
-using the _baseIndex_ function from the ART algorithm to
-build the complete-binary-tree (CBT) of prefixes for each stride.
+BART is a multibit-trie with fixed stride length of 8 bits, using a fast mapping
+function (taken from the ART algorithm) to map the 256 prefixes in each level
+node to form a complete-binary-tree.
 
-The CBT is implemented as a bit-vector, backtracking is just
-a matter of fast cache friendly bitmask operations.
+This complete binary tree is implemented with popcount compressed sparse arrays
+together with path compression. This reduces storage consumption by almost two
+orders of magnitude in comparison to ART, with even better lookup times for the
+longest prefix match.
 
-The Table is implemented with popcount compressed sparse arrays
-together with path compression. This reduces storage consumption
-by almost two orders of magnitude in comparison to ART with
-comparable or even better lookup times for longest prefix match.
+The BART algorithm is based on fixed size bit vectors and precalculated
+lookup tables. The lookup is performed entirely by fast,
+cache-friendly bitmask operations, which in modern CPUs are performed
+by advanced bit manipulation instruction sets (POPCNT, LZCNT, TZCNT, ...).
 
-The algorithm is also excellent for determining whether two tables
-contain overlapping IP addresses.
+The algorithm was specially developed so that it can always work with a fixed
+length of 256 bits. This means that the bitset fit very well in a cache line and
+that loops over the bitset in hot paths can be accelerated by loop unrolling, e.g.
 
-A Lite version is also included, this is ideal for simple IP
-access-control-lists, a.k.a. longest-prefix matches with plain true/false
-results.
+```go
+func (b *BitSet256) popcnt() (cnt int) {
+	cnt += bits.OnesCount64(b[0])
+	cnt += bits.OnesCount64(b[1])
+	cnt += bits.OnesCount64(b[2])
+	cnt += bits.OnesCount64(b[3])
+	return
+}
+```
 
-For all other tasks the much more powerful Table must be used.
+The BART algorithm is also excellent for determining whether two tables
+contain overlapping IP addresses, just in a few nanoseconds.
+
+A `bart.Lite` wrapper is included, this is ideal for simple IP
+ACLs (access-control-lists) with plain true/false results and no payload.
 
 ## Example
 
@@ -45,11 +58,11 @@ func ExampleLite_Contains() {
 
 	// Insert some prefixes
 	prefixes := []string{
-		"192.168.0.0/16",       // corporate
-		"192.168.1.0/24",       // department
-		"2001:7c0:3100::/40",   // corporate
-		"2001:7c0:3100:1::/64", // department
-		"fc00::/7",             // unique local
+		"192.168.0.0/16",
+		"192.168.1.0/24",
+		"2001:7c0:3100::/40",
+		"2001:7c0:3100:1::/64",
+		"fc00::/7",
 	}
 
 	for _, s := range prefixes {
@@ -59,11 +72,11 @@ func ExampleLite_Contains() {
 
 	// Test some IP addresses for black/whitelist containment
 	ips := []string{
-		"192.168.1.100",      // must match, department
-		"192.168.2.1",        // must match, corporate
-		"2001:7c0:3100:1::1", // must match, department
-		"2001:7c0:3100:2::1", // must match, corporate
-		"fc00::1",            // must match, unique local
+		"192.168.1.100",      // must match
+		"192.168.2.1",        // must match
+		"2001:7c0:3100:1::1", // must match
+		"2001:7c0:3100:2::1", // must match
+		"fc00::1",            // must match
 		//
 		"172.16.0.1",        // must NOT match
 		"2003:dead:beef::1", // must NOT match
@@ -87,8 +100,8 @@ func ExampleLite_Contains() {
 ```
 ## API
 
-Release v0.18 requires at least go1.23 and we use the `iter.Seq2[netip.Prefix, V]` types for iterators.
-The lock-free versions of insert, update and delete are added, but still experimentell.
+From release v0.18.x on, bart requires at least go1.23, the `iter.Seq2[netip.Prefix, V]` types for iterators
+are used. The lock-free versions of insert, update and delete are added, but still experimental.
 
 ```golang
   import "github.com/gaissmai/bart"
@@ -104,7 +117,7 @@ The lock-free versions of insert, update and delete are added, but still experim
     // external lock mechanism or the various ...Persist functions must be used
     // which return a modified routing table by leaving the original unchanged
 
-    // A Table must not be copied by value, see Table.Clone.
+    // A Table must not be copied by value.
 
   func (t *Table[V]) Contains(ip netip.Addr) bool
   func (t *Table[V]) Lookup(ip netip.Addr) (val V, ok bool)
@@ -157,49 +170,31 @@ The lock-free versions of insert, update and delete are added, but still experim
   func (t *Table[V]) DumpList6() []DumpListNode[V]
 ```
 
-```golang
-  type Lite struct {
-  	// Has unexported fields.
-  }
-  //  Lite is the little sister of Table. Lite is ideal for simple IP
-  //  access-control-lists, a.k.a. longest-prefix matches with plain
-  //  true/false results.
-  //
-  //  For all other tasks, the much more powerful Table must be used.
-  
-  func (l *Lite) Insert(pfx netip.Prefix)
-  func (l *Lite) Delete(pfx netip.Prefix)
-  func (l *Lite) Contains(ip netip.Addr) bool
-```
-
 ## benchmarks
 
 Please see the extensive [benchmarks](https://github.com/gaissmai/iprbench) comparing `bart` with other IP routing table implementations.
 
-Just a teaser, Contains and Lookups against the full Internet routing table with random IP address probes:
+Just a teaser, `Contains` and `Lookup` against the Tier1 full Internet routing table with
+random IP address probes:
 
 ```
 goos: linux
 goarch: amd64
 pkg: github.com/gaissmai/bart
 cpu: Intel(R) Core(TM) i5-8250U CPU @ 1.60GHz
-BenchmarkFullMatchV4/Contains           55906228        21.39  ns/op       0 B/op       0 allocs/op
-BenchmarkFullMatchV6/Contains           100000000       11.38  ns/op       0 B/op       0 allocs/op
-BenchmarkFullMissV4/Contains            52927538        22.69  ns/op       0 B/op       0 allocs/op
-BenchmarkFullMissV6/Contains            250386540        4.883 ns/op       0 B/op       0 allocs/op
-PASS
-ok      github.com/gaissmai/bart    11.291s
+BenchmarkFullMatch4/Contains        129756907	         8.409 ns/op
+BenchmarkFullMatch6/Contains        96855786	        11.72 ns/op
+BenchmarkFullMiss4/Contains         56269990	        18.58 ns/op
+BenchmarkFullMiss6/Contains         131779195	        10.08 ns/op
 
 goos: linux
 goarch: amd64
 pkg: github.com/gaissmai/bart
 cpu: Intel(R) Core(TM) i5-8250U CPU @ 1.60GHz
-BenchmarkFullMatchV4/Lookup             53578766        21.77  ns/op       0 B/op       0 allocs/op
-BenchmarkFullMatchV6/Lookup             57054618        21.07  ns/op       0 B/op       0 allocs/op
-BenchmarkFullMissV4/Lookup              48289306        25.60  ns/op       0 B/op       0 allocs/op
-BenchmarkFullMissV6/Lookup              142917571        8.387 ns/op       0 B/op       0 allocs/op
-PASS
-ok      github.com/gaissmai/bart    10.455s
+BenchmarkFullMatch4/Lookup         	47039798	        24.44 ns/op
+BenchmarkFullMatch6/Lookup         	81769753	        13.61 ns/op
+BenchmarkFullMiss4/Lookup          	51986374	        22.72 ns/op
+BenchmarkFullMiss6/Lookup          	100000000	        11.47 ns/op
 ```
 
 ## Compatibility Guarantees

@@ -1,268 +1,95 @@
-// Copyright (c) 2025 Karl Gaissmaier
+// Copyright (c) 2024 Karl Gaissmaier
 // SPDX-License-Identifier: MIT
 
 package bart
 
-import (
-	"net/netip"
+import "net/netip"
 
-	"github.com/admpub/bart/internal/art"
-	"github.com/admpub/bart/internal/bitset"
-	"github.com/admpub/bart/internal/lpmbt"
-	"github.com/admpub/bart/internal/sparse"
-)
-
-// Lite is the little sister of [Table]. Lite is ideal for simple
-// IP access-control-lists, a.k.a. longest-prefix matches
-// with plain true/false results.
+// Lite is just a convenience wrapper for Table, instantiated with an
+// empty struct as payload. Lite is ideal for simple IP ACLs
+// (access-control-lists) with plain true/false results without a payload.
 //
-// For all other tasks the much more powerful [Table] must be used.
+// Lite delegates almost all methods unmodified to the underlying Table.
+//
+// Some of the Table methods make no sense without a payload.
+// Their signature has been changed and they do not accept any arguments
+// and if they are used anyway, they will generate a panic.
 type Lite struct {
-	// used by -copylocks checker from `go vet`.
-	_ noCopy
-
-	// the root nodes, implemented as popcount compressed multibit tries
-	root4 liteNode
-	root6 liteNode
+	Table[struct{}]
 }
 
-// rootNodeByVersion, root node getter for ip version.
-func (l *Lite) rootNodeByVersion(is4 bool) *liteNode {
-	if is4 {
-		return &l.root4
-	}
-	return &l.root6
+// Exists returns true if the prefix exists in the table.
+// It's an adapter to [Table.Get].
+func (l *Lite) Exists(pfx netip.Prefix) bool {
+	_, ok := l.Get(pfx)
+	return ok
 }
 
-// Insert adds pfx to the trie.
+// Insert a pfx into the tree.
 func (l *Lite) Insert(pfx netip.Prefix) {
-	if !pfx.IsValid() {
-		return
-	}
-
-	// canonicalize prefix
-	pfx = pfx.Masked()
-
-	is4 := pfx.Addr().Is4()
-	n := l.rootNodeByVersion(is4)
-
-	n.insertAtDepth(pfx, 0)
+	l.Table.Insert(pfx, struct{}{})
 }
 
-// Delete removes pfx from the trie.
-func (l *Lite) Delete(pfx netip.Prefix) {
-	if !pfx.IsValid() {
-		return
-	}
-
-	// canonicalize prefix
-	pfx = pfx.Masked()
-
-	// values derived from pfx
-	ip := pfx.Addr()
-	is4 := ip.Is4()
-	bits := pfx.Bits()
-
-	n := l.rootNodeByVersion(is4)
-
-	lastIdx, lastBits := lastOctetIdxAndBits(bits)
-
-	octets := ip.AsSlice()
-	octets = octets[:lastIdx+1]
-
-	// record path to deleted node
-	// needed to purge and/or path compress nodes after deletion
-	stack := [maxTreeDepth]*liteNode{}
-
-	// find the trie node
-	for depth, octet := range octets {
-		// push current node on stack for path recording
-		stack[depth] = n
-
-		// delete prefix in trie node
-		if depth == lastIdx {
-			n.prefixes = n.prefixes.Clear(art.PfxToIdx(octet, lastBits))
-			n.purgeAndCompress(stack[:depth], octets, is4)
-			return
-		}
-
-		addr := uint(octet)
-		if !n.children.Test(addr) {
-			return
-		}
-
-		// get the child: node or leaf
-		switch kid := n.children.MustGet(addr).(type) {
-		case *liteNode:
-			n = kid
-			continue // descend down to next trie level
-
-		case netip.Prefix:
-			// reached a path compressed prefix, stop traversing
-			if kid != pfx {
-				// nothing to delete
-				return
-			}
-
-			// prefix is equal leaf, delete leaf
-			n.children.DeleteAt(addr)
-			n.purgeAndCompress(stack[:depth], octets, is4)
-
-			return
-
-		default:
-			panic("logic error, wrong node type")
-		}
-	}
-
-	panic("unreachable")
+// InsertPersist is similar to Insert but the receiver isn't modified.
+func (l *Lite) InsertPersist(pfx netip.Prefix) *Lite {
+	tbl := l.Table.InsertPersist(pfx, struct{}{})
+	//nolint:govet // copy of *tbl is here by intention
+	return &Lite{*tbl}
 }
 
-// Contains performs a longest-prefix match for the IP address
-// and returns true if any route matches, otherwise false.
-func (l *Lite) Contains(ip netip.Addr) bool {
-	if !ip.IsValid() {
-		return false
-	}
-
-	is4 := ip.Is4()
-	n := l.rootNodeByVersion(is4)
-
-	octets := ip.AsSlice()
-
-	for _, octet := range octets {
-		addr := uint(octet)
-
-		// for contains, any lpm match is good enough, no backtracking needed
-		if n.prefixes.IntersectsAny(lpmbt.LookupTbl[art.HostIdx(addr)]) {
-			return true
-		}
-
-		if !n.children.Test(addr) {
-			return false
-		}
-
-		// get node or leaf for octet
-		switch kid := n.children.MustGet(addr).(type) {
-		case *liteNode:
-			n = kid
-			continue // descend down to next trie level
-
-		case netip.Prefix:
-			return kid.Contains(ip)
-
-		default:
-			panic("logic error, wrong node type")
-		}
-	}
-
-	panic("unreachable")
+// DeletePersist is similar to Delete but the receiver isn't modified.
+func (l *Lite) DeletePersist(pfx netip.Prefix) *Lite {
+	tbl := l.Table.DeletePersist(pfx)
+	//nolint:govet // copy of *tbl is here by intention
+	return &Lite{*tbl}
 }
 
-// ###################################################################
-
-// liteNode, see the node struct, but without payload V.
-// Needs less memory and insert and delete is also a bit faster.
-type liteNode struct {
-	prefixes bitset.BitSet
-	children sparse.Array[any]
+// Clone returns a copy of the routing table.
+func (l *Lite) Clone() *Lite {
+	tbl := l.Table.Clone()
+	//nolint:govet // copy of *tbl is here by intention
+	return &Lite{*tbl}
 }
 
-// insertAtDepth, see the similar method for node, but now simpler without payload V.
-func (n *liteNode) insertAtDepth(pfx netip.Prefix, depth int) {
-	ip := pfx.Addr()
-	bits := pfx.Bits()
-
-	lastIdx, lastBits := lastOctetIdxAndBits(bits)
-
-	octets := ip.AsSlice()
-	octets = octets[:lastIdx+1]
-
-	// find the proper trie node to insert prefix
-	// start with prefix octet at depth
-	for ; depth < len(octets); depth++ {
-		octet := octets[depth]
-		addr := uint(octet)
-
-		// last significant octet: insert/override prefix into node
-		if depth == lastIdx {
-			// just set a bit, no payload to insert
-			n.prefixes = n.prefixes.Set(art.PfxToIdx(octet, lastBits))
-			return
-		}
-
-		if !n.children.Test(addr) {
-			// insert prefix as path-compressed leaf
-			n.children.InsertAt(addr, pfx)
-			return
-		}
-
-		// get the child: node or leaf
-		switch kid := n.children.MustGet(addr).(type) {
-		case *liteNode:
-			n = kid
-			continue // descend down to next trie level
-
-		case netip.Prefix:
-			// reached a path-compressed leaf, just a netip.Prefix
-			if kid == pfx {
-				// already exists, nothing to do
-				return
-			}
-
-			// create new node
-			// push the leaf down
-			// insert new child at current leaf position (addr)
-			// descend down, replace n with new child
-			newNode := new(liteNode)
-			newNode.insertAtDepth(kid, depth+1)
-
-			n.children.InsertAt(addr, newNode)
-			n = newNode
-
-		default:
-			panic("logic error, wrong node type")
-		}
-	}
-
-	panic("unreachable")
+// Union combines two tables, changing the receiver table.
+func (l *Lite) Union(o *Lite) {
+	l.Table.Union(&o.Table)
 }
 
-// purgeAndCompress, purge empty nodes or compress nodes with single prefix or leaf.
-// similar to the same helper method for node, but without payload V.
-func (n *liteNode) purgeAndCompress(parentStack []*liteNode, childPath []uint8, is4 bool) {
-	// unwind the stack
-	for i := len(parentStack) - 1; i >= 0; i-- {
-		parent := parentStack[i]
-		addr := uint(childPath[i])
+// Overlaps4 reports whether any IPv4 in the table matches a route in the
+// other table or vice versa.
+func (l *Lite) Overlaps4(o *Lite) bool {
+	return l.Table.Overlaps4(&o.Table)
+}
 
-		prefixCount := n.prefixes.Size()
-		childCount := n.children.Len()
+// Overlaps6 reports whether any IPv6 in the table matches a route in the
+// other table or vice versa.
+func (l *Lite) Overlaps6(o *Lite) bool {
+	return l.Table.Overlaps6(&o.Table)
+}
 
-		switch {
-		case prefixCount == 0 && childCount == 0:
-			// just delete this empty node
-			parent.children.DeleteAt(addr)
+// Overlaps reports whether any IP in the table matches a route in the
+// other table or vice versa.
+func (l *Lite) Overlaps(o *Lite) bool {
+	return l.Table.Overlaps(&o.Table)
+}
 
-		case prefixCount == 0 && childCount == 1:
-			// if single child is a path-compressed leaf, shift it up one level
-			// and override current node with this leaf
-			if pfx, ok := n.children.Items[0].(netip.Prefix); ok {
-				parent.children.InsertAt(addr, pfx)
-			}
+// Deprecated: Update is pointless without payload and panics.
+func (l *Lite) Update() {
+	panic("Update is pointless without payload")
+}
 
-		case prefixCount == 1 && childCount == 0:
-			// make prefix from idx, shift leaf one level up
-			// and override current node with new leaf
-			idx, _ := n.prefixes.FirstSet()
+// Deprecated: UpdatePersist is pointless without payload and panics.
+func (l *Lite) UpdatePersist() {
+	panic("UpdatePersist is pointless without payload")
+}
 
-			path := stridePath{}
-			copy(path[:], childPath)
-			pfx := cidrFromPath(path, i+1, is4, idx)
+// Deprecated: GetAndDelete is pointless without payload and panics.
+func (l *Lite) GetAndDelete() {
+	panic("GetAndDelete is pointless without payload")
+}
 
-			parent.children.InsertAt(addr, pfx)
-		}
-
-		n = parent
-	}
+// Deprecated: GetAndDeletePersist is pointless without payload and panics.
+func (l *Lite) GetAndDeletePersist() {
+	panic("GetAndDeletePersist is pointless without payload")
 }

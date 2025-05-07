@@ -5,6 +5,7 @@ package bart
 
 import (
 	"cmp"
+	"fmt"
 	"net/netip"
 	"slices"
 )
@@ -16,6 +17,10 @@ type goldTable[V any] []goldTableItem[V]
 type goldTableItem[V any] struct {
 	pfx netip.Prefix
 	val V
+}
+
+func (g goldTableItem[V]) String() string {
+	return fmt.Sprintf("(%s, %v)", g.pfx, g.val)
 }
 
 //nolint:unused
@@ -204,7 +209,7 @@ func randomPrefixes4(n int) []goldTableItem[int] {
 	return ret
 }
 
-// randomPrefixes6 returns n randomly generated IPv4 prefixes and associated values.
+// randomPrefixes6 returns n randomly generated IPv6 prefixes and associated values.
 // skip default route
 func randomPrefixes6(n int) []goldTableItem[int] {
 	pfxs := map[netip.Prefix]bool{}
@@ -258,7 +263,7 @@ func randomPrefix6() netip.Prefix {
 func randomIP4() netip.Addr {
 	var b [4]byte
 	for i := range b {
-		b[i] = byte(prng.Uint32() & 0xff)
+		b[i] = byte(prng.UintN(256))
 	}
 	return netip.AddrFrom4(b)
 }
@@ -266,7 +271,7 @@ func randomIP4() netip.Addr {
 func randomIP6() netip.Addr {
 	var b [16]byte
 	for i := range b {
-		b[i] = byte(prng.Uint32() & 0xff)
+		b[i] = byte(prng.UintN(256))
 	}
 	return netip.AddrFrom16(b)
 }

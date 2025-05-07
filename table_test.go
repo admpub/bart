@@ -13,7 +13,8 @@ import (
 	"fmt"
 	"math/rand"
 	"net/netip"
-	"reflect"
+	"runtime"
+	"strconv"
 	"testing"
 )
 
@@ -152,6 +153,35 @@ func TestInvalid(t *testing.T) {
 		}(testname)
 
 		_, _, _ = tbl.GetAndDeletePersist(zeroPfx)
+	})
+
+	testname = "Contains"
+	t.Run(testname, func(t *testing.T) {
+		t.Parallel()
+		defer func(testname string) {
+			if r := recover(); r != nil {
+				t.Fatalf("%s panics on invalid IP input", testname)
+			}
+		}(testname)
+
+		if tbl.Contains(zeroIP) != false {
+			t.Errorf("%s returns true on invalid IP input, expected false", testname)
+		}
+	})
+
+	testname = "Lookup"
+	t.Run(testname, func(t *testing.T) {
+		t.Parallel()
+		defer func(testname string) {
+			if r := recover(); r != nil {
+				t.Fatalf("%s panics on invalid IP input", testname)
+			}
+		}(testname)
+
+		_, got := tbl.Lookup(zeroIP)
+		if got != false {
+			t.Errorf("%s returns true on invalid IP input, expected false", testname)
+		}
 	})
 
 	testname = "LookupPrefix"
@@ -1608,41 +1638,49 @@ func TestDeleteShuffled(t *testing.T) {
 		numPrefixes  = 10_000 // prefixes to insert (test deletes 50% of them)
 		numPerFamily = numPrefixes / 2
 		deleteCut    = numPerFamily / 2
-		numProbes    = 10_000 // random addr lookups to do
 	)
 
-	// We have to do this little dance instead of just using allPrefixes,
-	// because we want pfxs and toDelete to be non-overlapping sets.
-	all4, all6 := randomPrefixes4(numPerFamily), randomPrefixes6(numPerFamily)
-
-	pfxs := append([]goldTableItem[int](nil), all4[:deleteCut]...)
-	pfxs = append(pfxs, all6[:deleteCut]...)
-
-	toDelete := append([]goldTableItem[int](nil), all4[deleteCut:]...)
-	toDelete = append(toDelete, all6[deleteCut:]...)
-
-	rt1 := new(Table[int])
-	for _, pfx := range pfxs {
-		rt1.Insert(pfx.pfx, pfx.val)
-	}
-	for _, pfx := range toDelete {
-		rt1.Insert(pfx.pfx, pfx.val)
-	}
-	for _, pfx := range toDelete {
-		rt1.Delete(pfx.pfx)
-	}
-
 	for range 10 {
+		// We have to do this little dance instead of just using allPrefixes,
+		// because we want pfxs and toDelete to be non-overlapping sets.
+		all4, all6 := randomPrefixes4(numPerFamily), randomPrefixes6(numPerFamily)
+
+		pfxs := append([]goldTableItem[int](nil), all4[:deleteCut]...)
+		pfxs = append(pfxs, all6[:deleteCut]...)
+
+		toDelete := append([]goldTableItem[int](nil), all4[deleteCut:]...)
+		toDelete = append(toDelete, all6[deleteCut:]...)
+
+		rt1 := new(Table[int])
+
+		// insert
+		for _, pfx := range pfxs {
+			rt1.Insert(pfx.pfx, pfx.val)
+		}
+		for _, pfx := range toDelete {
+			rt1.Insert(pfx.pfx, pfx.val)
+		}
+
+		// delete
+		for _, pfx := range toDelete {
+			rt1.Delete(pfx.pfx)
+		}
+
 		pfxs2 := append([]goldTableItem[int](nil), pfxs...)
 		toDelete2 := append([]goldTableItem[int](nil), toDelete...)
 		rand.Shuffle(len(toDelete2), func(i, j int) { toDelete2[i], toDelete2[j] = toDelete2[j], toDelete2[i] })
+
 		rt2 := new(Table[int])
+
+		// insert
 		for _, pfx := range pfxs2 {
 			rt2.Insert(pfx.pfx, pfx.val)
 		}
 		for _, pfx := range toDelete2 {
 			rt2.Insert(pfx.pfx, pfx.val)
 		}
+
+		// delete
 		for _, pfx := range toDelete2 {
 			rt2.Delete(pfx.pfx)
 		}
@@ -1684,6 +1722,49 @@ func TestDeleteIsReverseOfInsert(t *testing.T) {
 	}
 	if got := tbl.dumpString(); got != want {
 		t.Fatalf("after delete, mismatch:\n\n got: %s\n\nwant: %s", got, want)
+	}
+}
+
+func TestDeleteButOne(t *testing.T) {
+	t.Parallel()
+	// Insert N prefixes, then delete all but one
+	const N = 100
+
+	for range 1_000 {
+
+		tbl := new(Table[int])
+		prefixes := randomPrefixes(N)
+
+		for _, p := range prefixes {
+			tbl.Insert(p.pfx, p.val)
+		}
+
+		// shuffle the prefixes
+		rand.Shuffle(N, func(i, j int) {
+			prefixes[i], prefixes[j] = prefixes[j], prefixes[i]
+		})
+
+		for i, p := range prefixes {
+			// skip the first
+			if i == 0 {
+				continue
+			}
+			tbl.Delete(p.pfx)
+		}
+
+		stats4 := tbl.root4.nodeStatsRec()
+		stats6 := tbl.root6.nodeStatsRec()
+
+		if nodes := stats4.nodes + stats6.nodes; nodes != 1 {
+			t.Fatalf("delete but one, want nodes: 1, got: %d\n%s", nodes, tbl.dumpString())
+		}
+
+		sum := stats4.pfxs + stats4.leaves + stats4.fringes +
+			stats6.pfxs + stats6.leaves + stats6.fringes
+
+		if sum != 1 {
+			t.Fatalf("delete but one, onle one item must be left, but: %d\n%s", sum, tbl.dumpString())
+		}
 	}
 }
 
@@ -1900,6 +1981,10 @@ func TestUpdate(t *testing.T) {
 		{
 			name: "default route v6",
 			pfx:  mpp("::/0"),
+		},
+		{
+			name: "set v4 fringe",
+			pfx:  mpp("0.0.0.0/8"),
 		},
 		{
 			name: "set v4",
@@ -2224,7 +2309,7 @@ func TestCloneShallow(t *testing.T) {
 	want, _ := tbl.Get(pfx)
 	got, _ := clone.Get(pfx)
 
-	if !(*got == *want && got == want) {
+	if *got != *want || got != want {
 		t.Errorf("shallow copy, values and pointers must be equal:\nvalues(%d, %d)\n(ptr(%v, %v)", *got, *want, got, want)
 	}
 
@@ -2344,7 +2429,7 @@ func TestUnionShallow(t *testing.T) {
 	got, _ := tbl1.Get(pfx)
 	want, _ := tbl2.Get(pfx)
 
-	if !(*got == *want && got == want) {
+	if *got != *want || got != want {
 		t.Errorf("shallow copy, values and pointers must be equal:\nvalues(%d, %d)\n(ptr(%v, %v)", *got, *want, got, want)
 	}
 
@@ -2483,15 +2568,13 @@ func TestSize(t *testing.T) {
 	var allInc4 int
 	var allInc6 int
 
-	tbl.AllSorted4()(func(netip.Prefix, any) bool {
+	for range tbl.AllSorted4() {
 		allInc4++
-		return true
-	})
+	}
 
-	tbl.AllSorted6()(func(netip.Prefix, any) bool {
+	for range tbl.AllSorted6() {
 		allInc6++
-		return true
-	})
+	}
 
 	if allInc4 != tbl.Size4() {
 		t.Errorf("Size4: want: %d, got: %d", allInc4, tbl.Size4())
@@ -2502,27 +2585,69 @@ func TestSize(t *testing.T) {
 	}
 }
 
-func TestIpAsOctets(t *testing.T) {
+func TestLastIdxLastBits(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		ip   netip.Addr
-		want []byte
+		pfx       netip.Prefix
+		wantDepth int
+		wantBits  uint8
 	}{
 		{
-			ip:   mpa("10.11.12.13"),
-			want: []byte{10, 11, 12, 13},
+			pfx:       mpp("0.0.0.0/0"),
+			wantDepth: 0,
+			wantBits:  0,
 		},
 		{
-			ip:   mpa("2001:db8::1"),
-			want: []byte{0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01},
+			pfx:       mpp("0.0.0.0/32"),
+			wantDepth: 4,
+			wantBits:  0,
+		},
+		{
+			pfx:       mpp("10.0.0.0/7"),
+			wantDepth: 0,
+			wantBits:  7,
+		},
+		{
+			pfx:       mpp("10.20.0.0/14"),
+			wantDepth: 1,
+			wantBits:  6,
+		},
+		{
+			pfx:       mpp("10.20.30.0/24"),
+			wantDepth: 3,
+			wantBits:  0,
+		},
+		{
+			pfx:       mpp("10.20.30.40/31"),
+			wantDepth: 3,
+			wantBits:  7,
+		},
+		//
+		{
+			pfx:       mpp("::/0"),
+			wantDepth: 0,
+			wantBits:  0,
+		},
+		{
+			pfx:       mpp("::/128"),
+			wantDepth: 16,
+			wantBits:  0,
+		},
+		{
+			pfx:       mpp("2001:db8::/31"),
+			wantDepth: 3,
+			wantBits:  7,
 		},
 	}
 
 	for _, tc := range tests {
-		got := tc.ip.AsSlice()
-		if !reflect.DeepEqual(got, tc.want) {
-			t.Errorf("ipAsOctets, %s, got: %v, want: %v", tc.ip, got, tc.want)
+		gotMaxDepth, gotBits := maxDepthAndLastBits(tc.pfx.Bits())
+		if gotMaxDepth != tc.wantDepth {
+			t.Errorf("maxDepthAndLastBits(%d), maxDepth got: %d, want: %d", tc.pfx.Bits(), gotMaxDepth, tc.wantDepth)
+		}
+		if gotBits != tc.wantBits {
+			t.Errorf("maxDepthAndLastBits(%d), lastBits got: %d, want: %d", tc.pfx.Bits(), gotBits, tc.wantBits)
 		}
 	}
 }
@@ -2554,7 +2679,13 @@ func BenchmarkTableInsertRandom(b *testing.B) {
 
 			s4 := rt.root4.nodeStatsRec()
 			s6 := rt.root6.nodeStatsRec()
-			stats := stats{s4.pfxs + s6.pfxs, s4.childs + s6.childs, s4.nodes + s6.nodes, s4.leaves + s6.leaves}
+			stats := stats{
+				s4.pfxs + s6.pfxs,
+				s4.childs + s6.childs,
+				s4.nodes + s6.nodes,
+				s4.leaves + s6.leaves,
+				s4.fringes + s6.fringes,
+			}
 
 			b.ReportMetric(float64(rt.Size())/float64(stats.nodes), "Prefix/Node")
 		})
@@ -2567,7 +2698,13 @@ func BenchmarkTableInsertRandom(b *testing.B) {
 
 			s4 := rt.root4.nodeStatsRec()
 			s6 := rt.root6.nodeStatsRec()
-			stats := stats{s4.pfxs + s6.pfxs, s4.childs + s6.childs, s4.nodes + s6.nodes, s4.leaves + s6.leaves}
+			stats := stats{
+				s4.pfxs + s6.pfxs,
+				s4.childs + s6.childs,
+				s4.nodes + s6.nodes,
+				s4.leaves + s6.leaves,
+				s4.fringes + s6.fringes,
+			}
 
 			b.ReportMetric(float64(rt.Size())/float64(stats.nodes), "Prefix/Node")
 		})
@@ -2620,7 +2757,7 @@ func BenchmarkTableGet(b *testing.B) {
 			b.ResetTimer()
 			b.Run(fmt.Sprintf("%s/From_%d", fam, nroutes), func(b *testing.B) {
 				for range b.N {
-					_, _ = rt.Get(probe.pfx)
+					_, boolSink = rt.Get(probe.pfx)
 				}
 			})
 		}
@@ -2645,28 +2782,28 @@ func BenchmarkTableLPM(b *testing.B) {
 			b.ResetTimer()
 			b.Run(fmt.Sprintf("%s/In_%6d/%s", fam, nroutes, "Contains"), func(b *testing.B) {
 				for range b.N {
-					_ = rt.Contains(probe.pfx.Addr())
+					boolSink = rt.Contains(probe.pfx.Addr())
 				}
 			})
 
 			b.ResetTimer()
 			b.Run(fmt.Sprintf("%s/In_%6d/%s", fam, nroutes, "Lookup"), func(b *testing.B) {
 				for range b.N {
-					writeSink, _ = rt.Lookup(probe.pfx.Addr())
+					_, boolSink = rt.Lookup(probe.pfx.Addr())
 				}
 			})
 
 			b.ResetTimer()
 			b.Run(fmt.Sprintf("%s/In_%6d/%s", fam, nroutes, "Prefix"), func(b *testing.B) {
 				for range b.N {
-					_, _ = rt.LookupPrefix(probe.pfx)
+					_, boolSink = rt.LookupPrefix(probe.pfx)
 				}
 			})
 
 			b.ResetTimer()
 			b.Run(fmt.Sprintf("%s/In_%6d/%s", fam, nroutes, "PrefixLPM"), func(b *testing.B) {
 				for range b.N {
-					_, _, _ = rt.LookupPrefixLPM(probe.pfx)
+					_, _, boolSink = rt.LookupPrefixLPM(probe.pfx)
 				}
 			})
 		}
@@ -2681,7 +2818,7 @@ func BenchmarkTableOverlapsPrefix(b *testing.B) {
 		}
 
 		for _, nroutes := range benchRouteCount {
-			var rt Table[int]
+			rt := new(Table[int])
 			for _, route := range rng(nroutes) {
 				rt.Insert(route.pfx, route.val)
 			}
@@ -2706,7 +2843,7 @@ func BenchmarkTableOverlaps(b *testing.B) {
 		}
 
 		for _, nroutes := range benchRouteCount {
-			var rt Table[int]
+			rt := new(Table[int])
 			for _, route := range rng(nroutes) {
 				rt.Insert(route.pfx, route.val)
 			}
@@ -2734,7 +2871,7 @@ func BenchmarkTableClone(b *testing.B) {
 		}
 
 		for _, nroutes := range benchRouteCount {
-			var rt Table[int]
+			rt := new(Table[int])
 			for _, route := range rng(nroutes) {
 				rt.Insert(route.pfx, route.val)
 			}
@@ -2746,6 +2883,105 @@ func BenchmarkTableClone(b *testing.B) {
 				}
 			})
 		}
+	}
+}
+
+func BenchmarkMemIP4(b *testing.B) {
+	for _, k := range []int{1_000, 10_000, 100_000, 1_000_000} {
+		var startMem, endMem runtime.MemStats
+
+		runtime.GC()
+		runtime.ReadMemStats(&startMem)
+
+		b.Run(strconv.Itoa(k), func(b *testing.B) {
+			rt := new(Table[struct{}])
+			for range b.N {
+				rt = new(Table[struct{}])
+				for _, pfx := range randomRealWorldPrefixes4(k) {
+					rt.Insert(pfx, struct{}{})
+				}
+			}
+
+			runtime.GC()
+			runtime.ReadMemStats(&endMem)
+
+			stats := rt.root4.nodeStatsRec()
+			b.ReportMetric(float64(endMem.HeapAlloc-startMem.HeapAlloc)/1024, "KByte")
+			b.ReportMetric(float64(stats.nodes), "node")
+			b.ReportMetric(float64(stats.pfxs), "pfxs")
+			b.ReportMetric(float64(stats.leaves), "leaf")
+			b.ReportMetric(float64(stats.fringes), "fringe")
+			b.ReportMetric(0, "ns/op")
+		})
+	}
+}
+
+func BenchmarkMemIP6(b *testing.B) {
+	for _, k := range []int{1_000, 10_000, 100_000, 1_000_000} {
+		var startMem, endMem runtime.MemStats
+
+		runtime.GC()
+		runtime.ReadMemStats(&startMem)
+
+		b.Run(strconv.Itoa(k), func(b *testing.B) {
+			rt := new(Table[struct{}])
+			for range b.N {
+				rt = new(Table[struct{}])
+				for _, pfx := range randomRealWorldPrefixes6(k) {
+					rt.Insert(pfx, struct{}{})
+				}
+			}
+
+			runtime.GC()
+			runtime.ReadMemStats(&endMem)
+
+			stats := rt.root6.nodeStatsRec()
+			b.ReportMetric(float64(endMem.HeapAlloc-startMem.HeapAlloc)/1024, "KByte")
+			b.ReportMetric(float64(stats.nodes), "node")
+			b.ReportMetric(float64(stats.pfxs), "pfxs")
+			b.ReportMetric(float64(stats.leaves), "leaf")
+			b.ReportMetric(float64(stats.fringes), "fringe")
+			b.ReportMetric(0, "ns/op")
+		})
+	}
+}
+
+func BenchmarkMem(b *testing.B) {
+	for _, k := range []int{1_000, 10_000, 100_000, 1_000_000} {
+		var startMem, endMem runtime.MemStats
+
+		runtime.GC()
+		runtime.ReadMemStats(&startMem)
+
+		b.Run(strconv.Itoa(k), func(b *testing.B) {
+			rt := new(Table[struct{}])
+			for range b.N {
+				rt = new(Table[struct{}])
+				for _, pfx := range randomRealWorldPrefixes(k) {
+					rt.Insert(pfx, struct{}{})
+				}
+			}
+
+			runtime.GC()
+			runtime.ReadMemStats(&endMem)
+
+			s4 := rt.root4.nodeStatsRec()
+			s6 := rt.root6.nodeStatsRec()
+			stats := stats{
+				s4.pfxs + s6.pfxs,
+				s4.childs + s6.childs,
+				s4.nodes + s6.nodes,
+				s4.leaves + s6.leaves,
+				s4.fringes + s6.fringes,
+			}
+
+			b.ReportMetric(float64(endMem.HeapAlloc-startMem.HeapAlloc)/1024, "KByte")
+			b.ReportMetric(float64(stats.nodes), "node")
+			b.ReportMetric(float64(stats.pfxs), "pfxs")
+			b.ReportMetric(float64(stats.leaves), "leaf")
+			b.ReportMetric(float64(stats.fringes), "fringe")
+			b.ReportMetric(0, "ns/op")
+		})
 	}
 }
 
@@ -2810,10 +3046,9 @@ func checkNumNodes(t *testing.T, tbl *Table[int], want int) {
 func (t *Table[V]) dumpAsGoldTable() goldTable[V] {
 	var tbl goldTable[V]
 
-	t.AllSorted()(func(pfx netip.Prefix, val V) bool {
-		tbl = append(tbl, goldTableItem[V]{pfx: pfx, val: val})
-		return true
-	})
+	for p, v := range t.AllSorted() {
+		tbl = append(tbl, goldTableItem[V]{pfx: p, val: v})
+	}
 
 	return tbl
 }
