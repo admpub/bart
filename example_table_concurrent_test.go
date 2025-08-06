@@ -4,7 +4,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/gaissmai/bart"
+	"github.com/admpub/bart"
 )
 
 // testVal is a simple sample value type.
