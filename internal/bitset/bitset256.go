@@ -1,29 +1,36 @@
 // Copyright (c) 2025 Karl Gaissmaier
 // SPDX-License-Identifier: MIT
 
-// Package bitset implements bitsets, a mapping
-// between non-negative integers and boolean values.
+// Package bitset provides a compact and efficient implementation of a fixed-length
+// bitset for the range [0..255].
 //
-// Studied [github.com/bits-and-blooms/bitset] inside out
-// and rewrote needed parts from scratch for this project.
+// This implementation is optimized for internal use in a compressed routing trie
+// and prioritizes minimal allocation, performance, and inlining. It supports
+// constant-time set/test operations, iteration over set bits, ranking, and masked
+// intersections.
 //
-// This implementation is heavily optimized for this internal use case.
+// Internally, the bitset is represented by four uint64 words, providing
+// fast bit-level access through direct indexing and hardware-accelerated primitives.
+//
+// If Go eventually supports SIMD intrinsics, this can be further optimized.
+//
+// For external consumers, the API intentionally avoids dynamic allocation except
+// when explicitly requested (via Bits()).
 package bitset
 
-// can inline (*BitSet256).All with cost 47
 // can inline (*BitSet256).AsSlice with cost 42
+// can inline (*BitSet256).Bits with cost 47
 // can inline (*BitSet256).Clear with cost 12
 // can inline (*BitSet256).FirstSet with cost 79
-// can inline (*BitSet256).IntersectionCardinality with cost 53
-// can inline (*BitSet256).IntersectionTop with cost 42
+// can inline (*BitSet256).Intersects with cost 48
 // can inline (*BitSet256).Intersection with cost 53
-// can inline (*BitSet256).IntersectsAny with cost 48
+// can inline (*BitSet256).IntersectionTop with cost 42
 // can inline (*BitSet256).IsEmpty with cost 22
+// can inline (*BitSet256).LastSet with cost 37
 // can inline (*BitSet256).NextSet with cost 65
 // can inline (*BitSet256).popcnt with cost 33
 // can inline (*BitSet256).Rank with cost 57
 // can inline (*BitSet256).Set with cost 12
-// can inline (*BitSet256).Size with cost 36
 // can inline (*BitSet256).Test with cost 15
 // can inline (*BitSet256).Union with cost 53
 
@@ -54,7 +61,7 @@ type BitSet256 [4]uint64
 
 // String implements fmt.Stringer.
 func (b *BitSet256) String() string {
-	return fmt.Sprintf("%v", b.All())
+	return fmt.Sprintf("%v", b.Bits())
 }
 
 // Set sets the bit.
@@ -72,33 +79,66 @@ func (b *BitSet256) Test(bit uint8) (ok bool) {
 	return b[bit>>6]&(1<<(bit&63)) != 0
 }
 
-// FirstSet returns the first bit set along with an ok code.
+// FirstSet returns the index of the lowest (first) bit that is set in the BitSet256.
+//
+// It searches the 256-bit set in ascending order and returns the position of the
+// first bit with value 1. If at least one bit is set, ok is true.
+// If no bits are set, ok is false and first is undefined.
+//
+// Example:
+//
+//	var bs BitSet256
+//	bs.Set(17)
+//	bs.Set(42)
+//	bs.Set(130)
+//	bs.Set(255)
+//	index, ok := bs.FirstSet()  // index == 17, ok == true
+//
+// Note: This implementation avoids a for loop for optimal speed.
+// On modern CPUs, computing all four trailing-zero counts up front allows
+// the CPU to parallelize these operations internally (pipelining), avoiding
+// branch misprediction and maximizing instruction throughput. This technique
+// is especially effective for bitsets with known, fixed word count.
 func (b *BitSet256) FirstSet() (first uint8, ok bool) {
 	// optimized for pipelining, can still inline with cost 79
-	x0 := uint8(bits.TrailingZeros64(b[0]))
-	x1 := uint8(bits.TrailingZeros64(b[1]))
-	x2 := uint8(bits.TrailingZeros64(b[2]))
-	x3 := uint8(bits.TrailingZeros64(b[3]))
+	x0 := bits.TrailingZeros64(b[0])
+	x1 := bits.TrailingZeros64(b[1])
+	x2 := bits.TrailingZeros64(b[2])
+	x3 := bits.TrailingZeros64(b[3])
 
 	if x0 != 64 {
-		return x0, true
+		return uint8(x0), true
 	}
 	if x1 != 64 {
-		return x1 + 64, true
+		return uint8(x1 + 64), true
 	}
 	if x2 != 64 {
-		return x2 + 128, true
+		return uint8(x2 + 128), true
 	}
 	if x3 != 64 {
-		return x3 + 192, true
+		return uint8(x3 + 192), true
 	}
 
 	return
 }
 
-// NextSet returns the next bit set from the specified start bit,
-// including possibly the current bit along with an ok code.
-func (b *BitSet256) NextSet(bit uint8) (next uint8, iok bool) {
+// NextSet returns the index of the next set bit that is greater than or equal to bit.
+//
+// If such a bit exists, it returns its index as next and ok=true.
+// Otherwise, ok is false and next is undefined.
+//
+// The search starts at the given bit index and proceeds toward higher indices, scanning
+// across all four 64-bit segments of the internal bitset representation.
+//
+// Example:
+//
+//	b.Set(5)
+//	b.Set(130)
+//	b.NextSet(0)   ->   5, true
+//	b.NextSet(5)   ->   5, true
+//	b.NextSet(6)   -> 130, true
+//	b.NextSet(200) ->   0, false
+func (b *BitSet256) NextSet(bit uint8) (next uint8, ok bool) {
 	wIdx := int(bit >> 6)
 
 	// process the first (maybe partial) word
@@ -116,8 +156,56 @@ func (b *BitSet256) NextSet(bit uint8) (next uint8, iok bool) {
 	return
 }
 
-// AsSlice returns all set bits as slice of uint8 without
-// heap allocations.
+// LastSet returns the index of the highest (last) bit that is set in the BitSet256.
+//
+// It searches the bitset in descending order and returns the position of the
+// first bit (top bit) with value 1. If at least one bit is set, ok is true.
+// If no bits are set, ok is false and last is undefined.
+//
+// Example:
+//
+//	var bs BitSet256
+//	bs.Set(2)
+//	bs.Set(130)
+//	bs.Set(214)
+//	index, ok := bs.LastSet()  // index == 214, ok == true
+func (b *BitSet256) LastSet() (last uint8, ok bool) {
+	// optimized for pipelining, sorry, can't inline, cost 81>80
+	// try it again when Go supports SIMD intrinsics
+	//
+	// ### b3 := bits.Len64(b[3])
+	// ### b2 := bits.Len64(b[2])
+	// ### b1 := bits.Len64(b[1])
+	// ### b0 := bits.Len64(b[0])
+
+	// ### if b3 != 0 {
+	// ### 	return uint8(b3 + 191), true
+	// ### }
+	// ### if b2 != 0 {
+	// ### 	return uint8(b2 + 127), true
+	// ### }
+	// ### if b1 != 0 {
+	// ### 	return uint8(b1 + 63), true
+	// ### }
+	// ### if b0 != 0 {
+	// ### 	return uint8(b0 - 1), true
+	// ### }
+	// ### return
+
+	for wIdx := 3; wIdx >= 0; wIdx-- {
+		if word := b[wIdx]; word != 0 {
+			return uint8(wIdx<<6+bits.Len64(word)) - 1, true
+		}
+	}
+	return
+}
+
+// AsSlice returns a slice containing all set bits in the BitSet256.
+//
+// The bits are returned in ascending order as uint8 values. The provided buf
+// must be a pointer to an array of 256 uint8s; it is used as backing
+// storage for the result to avoid heap allocations. The returned slice shares
+// its backing array with buf and is only valid until buf is modified or reused.
 func (b *BitSet256) AsSlice(buf *[256]uint8) []uint8 {
 	size := 0
 	for wIdx, word := range b {
@@ -130,8 +218,17 @@ func (b *BitSet256) AsSlice(buf *[256]uint8) []uint8 {
 	return buf[:size]
 }
 
-// All returns all set bits. This has a simpler API but is slower than AsSlice.
-func (b *BitSet256) All() []uint8 {
+// Bits returns a slice containing all set bits in the BitSet256.
+//
+// The bits are returned in ascending order as uint8 values. Bits allocates
+// a new slice on the heap for the result. For allocation-free collection,
+// use [AsSlice] with a pre-allocated buffer.
+//
+// Example usage:
+//
+//	bits := b.Bits()
+//	// bits now contains the indices of all set bits in b
+func (b *BitSet256) Bits() []uint8 {
 	return b.AsSlice(&[256]uint8{})
 }
 
@@ -146,7 +243,28 @@ func (b *BitSet256) IntersectionTop(c *BitSet256) (top uint8, ok bool) {
 	return
 }
 
-// Rank returns the set bits up to and including to idx.
+// Rank returns the number of bits set (i.e., value 1) in the BitSet256
+// up to and including the provided index.
+//
+// The rank is computed efficiently using precomputed bitmasks (rankMask),
+// which mask out all bits above the index. For example:
+//
+//	b.Set(3)
+//	b.Set(5)
+//	b.Set(120)
+//	b.Rank(5)   -> 2     // only bits 3 and 5 are ≤ 5
+//	b.Rank(119) -> 2     // only bits 3 and 5 are ≤ 119
+//	b.Rank(120) -> 3     // bit 120 is included here
+//
+// Rank is particularly useful in prefix trees, indexing schemes,
+// and data compression techniques where ordinal positions matter.
+//
+// Internally, the function performs four bitwise-and operations
+// between the bitset words and a precomputed mask covering bits 0..idx,
+// followed by popcount operations (via bits.OnesCount64).
+//
+// This avoids dynamic mask construction and enables branch-free, highly
+// predictable performance.
 func (b *BitSet256) Rank(idx uint8) (rnk int) {
 	rnk += bits.OnesCount64(b[0] & rankMask[idx][0])
 	rnk += bits.OnesCount64(b[1] & rankMask[idx][1])
@@ -160,9 +278,9 @@ func (b *BitSet256) IsEmpty() bool {
 	return b[0]|b[1]|b[2]|b[3] == 0
 }
 
-// IntersectsAny returns true if the intersection of base set with the compare set
+// Intersects returns true if the intersection of base set with the compare set
 // is not the empty set.
-func (b *BitSet256) IntersectsAny(c *BitSet256) bool {
+func (b *BitSet256) Intersects(c *BitSet256) bool {
 	return b[0]&c[0] != 0 ||
 		b[1]&c[1] != 0 ||
 		b[2]&c[2] != 0 ||
@@ -189,22 +307,8 @@ func (b *BitSet256) Union(c *BitSet256) (bs BitSet256) {
 	return
 }
 
-// IntersectionCardinality computes the popcount of the intersection.
-func (b *BitSet256) IntersectionCardinality(c *BitSet256) (cnt int) {
-	cnt += bits.OnesCount64(b[0] & c[0])
-	cnt += bits.OnesCount64(b[1] & c[1])
-	cnt += bits.OnesCount64(b[2] & c[2])
-	cnt += bits.OnesCount64(b[3] & c[3])
-	return
-}
-
-// Size is the number of set bits (popcount).
-func (b *BitSet256) Size() int {
-	return b.popcnt()
-}
-
-// popcnt, count all the set bits
-func (b *BitSet256) popcnt() (cnt int) {
+// popcount is the number of set bits.
+func (b *BitSet256) popcount() (cnt int) {
 	cnt += bits.OnesCount64(b[0])
 	cnt += bits.OnesCount64(b[1])
 	cnt += bits.OnesCount64(b[2])
@@ -212,15 +316,20 @@ func (b *BitSet256) popcnt() (cnt int) {
 	return
 }
 
-// rankMask, all 1 until and including bit pos, the rest is zero, example:
+// rankMask is a table of bitmasks with all bits set to 1 up to and including a given bit position.
+// It is used by BitSet256.Rank() to perform efficient popcount operations.
 //
-//	bs.Rank(7) = popcnt(bs & rankMask[7]) and rankMask[7] = 0000...0000_1111_1111
+// This approach trades ~8KB of static memory for zero-allocation,
+// fully branch-free, and cache-friendly Rank() calls with constant runtime.
+//
+// Used internally by the trie for position counting, CIDR ordering,
+// and fast range-limited bit population counts.
 var rankMask = [256]BitSet256{
-	/*   0 */ {0x1, 0x0, 0x0, 0x0}, // 256 bits: 0000...0_0001
-	/*   1 */ {0x3, 0x0, 0x0, 0x0}, // 256 bits: 0000...0_0011
-	/*   2 */ {0x7, 0x0, 0x0, 0x0}, // 256 bits: 0000...0_0111
-	/*   3 */ {0xf, 0x0, 0x0, 0x0}, // 256 bits: 0000...0_1111
-	/*   4 */ {0x1f, 0x0, 0x0, 0x0}, // ...
+	/*   0 */ {0x1, 0x0, 0x0, 0x0},
+	/*   1 */ {0x3, 0x0, 0x0, 0x0},
+	/*   2 */ {0x7, 0x0, 0x0, 0x0},
+	/*   3 */ {0xf, 0x0, 0x0, 0x0},
+	/*   4 */ {0x1f, 0x0, 0x0, 0x0},
 	/*   5 */ {0x3f, 0x0, 0x0, 0x0},
 	/*   6 */ {0x7f, 0x0, 0x0, 0x0},
 	/*   7 */ {0xff, 0x0, 0x0, 0x0},

@@ -5,6 +5,7 @@ package sparse
 
 import (
 	"math/rand/v2"
+	"slices"
 	"testing"
 )
 
@@ -60,6 +61,12 @@ func TestSparseArrayGet(t *testing.T) {
 		if v != i {
 			t.Errorf("MustGet, expected %d, got %d", i, v)
 		}
+	}
+
+	a.DeleteAt(0)
+	_, ok := a.Get(0)
+	if ok {
+		t.Errorf("Get, expected false, got %v", ok)
 	}
 }
 
@@ -145,38 +152,76 @@ func TestSparseArrayUpdate(t *testing.T) {
 }
 
 func TestSparseArrayCopy(t *testing.T) {
-	t.Parallel()
-	var a *Array256[int]
-
-	if a.Copy() != nil {
-		t.Fatal("copy a nil array, expected nil")
+	type testCase struct {
+		name  string
+		setup func() *Array256[int]
 	}
 
-	a = new(Array256[int])
-
-	for i := range 255 {
-		a.InsertAt(uint8(i), i)
+	tests := []testCase{
+		{
+			name: "Copy of nil returns nil",
+			setup: func() *Array256[int] {
+				return nil
+			},
+		},
+		{
+			name: "Copy of empty Array256",
+			setup: func() *Array256[int] {
+				return &Array256[int]{}
+			},
+		},
+		{
+			name: "Copy after InsertAt few elements",
+			setup: func() *Array256[int] {
+				a := &Array256[int]{}
+				a.InsertAt(10, 100)
+				a.InsertAt(20, 200)
+				a.InsertAt(30, 300)
+				return a
+			},
+		},
+		{
+			name: "Copy after Insert and Delete",
+			setup: func() *Array256[int] {
+				a := &Array256[int]{}
+				a.InsertAt(1, 11)
+				a.InsertAt(2, 22)
+				a.DeleteAt(1)
+				a.InsertAt(3, 33)
+				return a
+			},
+		},
 	}
 
-	// shallow copy
-	b := a.Copy()
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			original := tc.setup()
+			aCopy := original.Copy()
 
-	// basic values identity
-	for i, v := range a.Items {
-		if b.Items[i] != v {
-			t.Errorf("Clone, expect value: %v, got: %v", v, b.Items[i])
-		}
-	}
+			if original == nil {
+				if aCopy != nil {
+					t.Errorf("Copy of nil should be nil, got %v", aCopy)
+				}
+				return
+			}
 
-	// update array a
-	for i := range 255 {
-		a.UpdateAt(uint8(i), func(u int, _ bool) int { return u + 1 })
-	}
+			if aCopy == original {
+				t.Error("Copy() returned same pointer as original, want distinct copy")
+			}
 
-	// cloned array must now differ
-	for i, v := range a.Items {
-		if b.Items[i] == v {
-			t.Errorf("update a after Clone, b must now differ: aValue: %v, bValue: %v", b.Items[i], v)
-		}
+			if aCopy.BitSet256 != original.BitSet256 {
+				t.Errorf("BitSet256 not copied properly. got=%v, want=%v", aCopy.BitSet256, original.BitSet256)
+			}
+
+			if !slices.Equal(aCopy.Items, original.Items) {
+				t.Errorf("Items slice not copied properly. got=%v, want=%v", aCopy.Items, original.Items)
+			}
+
+			if len(original.Items) > 0 && len(aCopy.Items) > 0 {
+				if &aCopy.Items[0] == &original.Items[0] {
+					t.Error("Items backing array not copied, pointers are equal")
+				}
+			}
+		})
 	}
 }

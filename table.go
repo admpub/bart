@@ -1,28 +1,26 @@
-// Copyright (c) 2024 Karl Gaissmaier
+// Copyright (c) 2024-2025 Karl Gaissmaier
 // SPDX-License-Identifier: MIT
 
-// Package bart provides a Balanced-Routing-Table (BART).
+// Package bart provides a high-performance Balanced Routing Table (BART).
 //
 // BART is balanced in terms of memory usage and lookup time
-// for the longest-prefix match.
+// for longest-prefix match (LPM) queries on IPv4 and IPv6 addresses.
 //
-// BART is a multibit-trie with fixed stride length of 8 bits,
-// using a fast mapping function (taken from the ART algorithm) to map
-// the 256 prefixes in each level node to form a complete-binary-tree.
+// Internally, BART is implemented as a multibit trie with a fixed stride of 8 bits.
+// Each level node uses a fast mapping function (adapted from D. E. Knuths ART algorithm)
+// to arrange all 256 possible prefixes in a complete binary tree structure.
 //
-// This complete binary tree is implemented with popcount compressed
-// sparse arrays together with path compression. This reduces storage
-// consumption by almost two orders of magnitude in comparison to ART,
-// with even better lookup times for the longest prefix match.
+// Instead of allocating full arrays, BART uses popcount-compressed sparse arrays
+// and aggressive path compression. This results in up to 100x less memory usage
+// than ART, while maintaining or even improving lookup speed.
 //
-// The BART algorithm is based on bit vectors and precalculated
-// lookup tables. The search is performed entirely by fast,
-// cache-friendly bitmask operations, which in modern CPUs are performed
-// by advanced bit manipulation instruction sets (POPCNT, LZCNT, TZCNT).
+// Lookup operations are entirely bit-vector based and rely on precomputed
+// lookup tables. Because the data fits within 256-bit blocks, it allows
+// for extremely efficient, cacheline-aligned access and is accelerated by
+// CPU instructions such as POPCNT, LZCNT, and TZCNT.
 //
-// The algorithm was specially developed so that it can always work with a fixed
-// length of 256 bits. This means that the bitsets fit well in a cache line and
-// that loops in hot paths (4x uint64 = 256) can be accelerated by loop unrolling.
+// The fixed 256-bit representation (4x uint64) permits loop unrolling in hot paths,
+// ensuring predictable and fast performance even under high routing load.
 package bart
 
 import (
@@ -34,15 +32,16 @@ import (
 	"github.com/admpub/bart/internal/lpm"
 )
 
-// Table is an IPv4 and IPv6 routing table with payload V.
+// Table represents a thread-safe IPv4 and IPv6 routing table with payload V.
+//
 // The zero value is ready to use.
 //
-// The Table is safe for concurrent readers but not for concurrent readers
-// and/or writers. Either the update operations must be protected by an
-// external lock mechanism or the various ...Persist functions must be used
-// which return a modified routing table by leaving the original unchanged
+// The Table is safe for concurrent reads, but concurrent reads and writes
+// must be externally synchronized. Mutation via Insert/Delete requires locks,
+// or alternatively, use ...Persist methods which return a modified copy
+// without altering the original table (copy-on-write).
 //
-// A Table must not be copied by value.
+// A Table must not be copied by value; always pass by pointer.
 type Table[V any] struct {
 	// used by -copylocks checker from `go vet`.
 	_ [0]sync.Mutex
@@ -65,12 +64,12 @@ func (t *Table[V]) rootNodeByVersion(is4 bool) *node[V] {
 	return &t.root6
 }
 
-// maxDepthAndLastBits, get last significant octet and remaining bits
-// for a given netip.Prefix.
+// maxDepthAndLastBits, get the max depth in the trie and remaining bits
+// for a given CIDR at max depth.
 //
 // ATTENTION: Split the IP prefixes at 8bit borders, count from 0.
 //
-//	/0, /7, /15, /23, ...
+//	/7, /15, /23, /31, ..., /127
 //
 //	BitPos: [0-7],[8-15],[16-23],[24-31],[32]
 //	BitPos: [0-7],[8-15],[16-23],[24-31],[32-39],[40-47],[48-55],[56-63],...,[120-127],[128]
@@ -92,15 +91,15 @@ func (t *Table[V]) rootNodeByVersion(is4 bool) *node[V] {
 //	as path-compressed leaf.
 //
 // We are not splitting at /8, /16, ..., because this would mean that the
-// first node would have 512 prefixes, bits from [0-8]. All remaining nodes
-// would then only have 256 prefixes, e.g. bits from [9-16], [17-24], ...
-// but the algorithm would then require a variable bitset.
+// first node would have 512 prefixes, 9 bits from [0-8]. All remaining nodes
+// would then only have 8 bits from [9-16], [17-24], [25..32], ...
+// but the algorithm would then require a variable length bitset.
 //
 // If you can commit to a fixed size of [4]uint64, then the algorithm is
 // much faster due to modern CPUs.
 //
-// One could also imagine special hardware, since the actual algorithm consists
-// only of a few standardized bitset operations on a fixed length of 256 bits.
+// Perhaps a future Go version that supports SIMD instructions for the [4]uint64 vectors
+// will make the algorithm even faster on suitable hardware.
 func maxDepthAndLastBits(bits int) (maxDepth int, lastBits uint8) {
 	// maxDepth:  range from 0..4 or 0..16 !ATTENTION: not 0..3 or 0..15
 	// lastBits:  range from 0..7
@@ -155,7 +154,7 @@ func (t *Table[V]) Update(pfx netip.Prefix, cb func(val V, ok bool) V) (newVal V
 	for depth, octet := range octets {
 		// last octet from prefix, update/insert prefix into node
 		if depth == maxDepth {
-			newVal, exists := n.prefixes.UpdateAt(art.PfxToIdx256(octet, lastBits), cb)
+			newVal, exists := n.prefixes.UpdateAt(art.PfxToIdx(octet, lastBits), cb)
 			if !exists {
 				t.sizeUpdate(is4, 1)
 			}
@@ -167,9 +166,9 @@ func (t *Table[V]) Update(pfx netip.Prefix, cb func(val V, ok bool) V) (newVal V
 			// insert prefix path compressed
 			newVal := cb(zero, false)
 			if isFringe(depth, bits) {
-				n.children.InsertAt(octet, &fringeNode[V]{value: newVal})
+				n.children.InsertAt(octet, newFringeNode(newVal))
 			} else {
-				n.children.InsertAt(octet, &leafNode[V]{prefix: pfx, value: newVal})
+				n.children.InsertAt(octet, newLeafNode(pfx, newVal))
 			}
 			t.sizeUpdate(is4, 1)
 			return newVal
@@ -265,7 +264,7 @@ func (t *Table[V]) getAndDelete(pfx netip.Prefix) (val V, exists bool) {
 
 		if depth == maxDepth {
 			// try to delete prefix in trie node
-			val, exists = n.prefixes.DeleteAt(art.PfxToIdx256(octet, lastBits))
+			val, exists = n.prefixes.DeleteAt(art.PfxToIdx(octet, lastBits))
 			if !exists {
 				return
 			}
@@ -346,7 +345,7 @@ func (t *Table[V]) Get(pfx netip.Prefix) (val V, ok bool) {
 	// find the trie node
 	for depth, octet := range octets {
 		if depth == maxDepth {
-			return n.prefixes.Get(art.PfxToIdx256(octet, lastBits))
+			return n.prefixes.Get(art.PfxToIdx(octet, lastBits))
 		}
 
 		if !n.children.Test(octet) {
@@ -395,7 +394,7 @@ func (t *Table[V]) Contains(ip netip.Addr) bool {
 
 	for _, octet := range ip.AsSlice() {
 		// for contains, any lpm match is good enough, no backtracking needed
-		if n.prefixes.Len() != 0 && n.lpmTest(art.HostIdx(octet)) {
+		if n.prefixes.Len() != 0 && n.lpmTest(art.OctetToIdx(octet)) {
 			return true
 		}
 
@@ -490,7 +489,7 @@ LOOP:
 
 		// longest prefix match, skip if node has no prefixes
 		if n.prefixes.Len() != 0 {
-			idx := art.HostIdx(octets[depth])
+			idx := art.OctetToIdx(octets[depth])
 			// lpmGet(idx), manually inlined
 			// --------------------------------------------------------------
 			if topIdx, ok := n.prefixes.IntersectionTop(lpm.BackTrackingBitset(idx)); ok {
@@ -613,9 +612,9 @@ LOOP:
 		var idx uint
 		octet = octets[depth]
 		if depth == maxDepth {
-			idx = uint(art.PfxToIdx256(octet, lastBits))
+			idx = uint(art.PfxToIdx(octet, lastBits))
 		} else {
-			idx = art.HostIdx(octet)
+			idx = art.OctetToIdx(octet)
 		}
 
 		// manually inlined: lpmGet(idx)
@@ -629,11 +628,11 @@ LOOP:
 
 			// called from LookupPrefixLPM
 
-			// get the pfxLen from depth and top idx
-			pfxLen := art.PfxLen256(depth, topIdx)
+			// get the bits from depth and top idx
+			pfxBits := int(art.PfxBits(depth, topIdx))
 
 			// calculate the lpmPfx from incoming ip and new mask
-			lpmPfx, _ = ip.Prefix(int(pfxLen))
+			lpmPfx, _ = ip.Prefix(pfxBits)
 			return lpmPfx, val, ok
 		}
 	}
@@ -641,8 +640,26 @@ LOOP:
 	return
 }
 
-// Supernets returns an iterator over all CIDRs covering pfx.
-// The iteration is in reverse CIDR sort order, from longest-prefix-match to shortest-prefix-match.
+// Supernets returns an iterator over all supernet routes that cover the given prefix pfx.
+//
+// The traversal searches both exact-length and shorter (less specific) prefixes that
+// overlap or include pfx. Starting from the most specific position in the trie,
+// it walks upward through parent nodes and yields any matching entries found at each level.
+//
+// The iteration order is reverse-CIDR: from longest prefix match (LPM) towards
+// least-specific routes.
+//
+// The search is protocol-specific (IPv4 or IPv6) and stops immediately if the yield
+// function returns false. If pfx is invalid, the function silently returns.
+//
+// This can be used to enumerate all covering supernet routes in routing-based
+// policy engines, diagnostics tools, or fallback resolution logic.
+//
+// Example:
+//
+//	for supernet, val := range table.Supernets(netip.MustParsePrefix("192.0.2.128/25")) {
+//	    fmt.Println("Matched covering route:", supernet, "->", val)
+//	}
 func (t *Table[V]) Supernets(pfx netip.Prefix) iter.Seq2[netip.Prefix, V] {
 	return func(yield func(netip.Prefix, V) bool) {
 		if !pfx.IsValid() {
@@ -732,9 +749,9 @@ func (t *Table[V]) Supernets(pfx netip.Prefix) iter.Seq2[netip.Prefix, V] {
 			var idx uint
 			octet = octets[depth]
 			if depth == maxDepth {
-				idx = uint(art.PfxToIdx256(octet, lastBits))
+				idx = uint(art.PfxToIdx(octet, lastBits))
 			} else {
-				idx = art.HostIdx(octet)
+				idx = art.OctetToIdx(octet)
 			}
 
 			// micro benchmarking, skip if there is no match
@@ -751,8 +768,16 @@ func (t *Table[V]) Supernets(pfx netip.Prefix) iter.Seq2[netip.Prefix, V] {
 	}
 }
 
-// Subnets returns an iterator over all CIDRs covered by pfx.
-// The iteration is in natural CIDR sort order.
+// Subnets returns an iterator over all prefix–value pairs in the routing table
+// that are fully contained within the given prefix pfx.
+//
+// Entries are returned in CIDR sort order.
+//
+// Example:
+//
+//	for sub, val := range table.Subnets(netip.MustParsePrefix("10.0.0.0/8")) {
+//	    fmt.Println("Covered:", sub, "->", val)
+//	}
 func (t *Table[V]) Subnets(pfx netip.Prefix) iter.Seq2[netip.Prefix, V] {
 	return func(yield func(netip.Prefix, V) bool) {
 		if !pfx.IsValid() {
@@ -774,7 +799,7 @@ func (t *Table[V]) Subnets(pfx netip.Prefix) iter.Seq2[netip.Prefix, V] {
 		// find the trie node
 		for depth, octet := range octets {
 			if depth == maxDepth {
-				idx := art.PfxToIdx256(octet, lastBits)
+				idx := art.PfxToIdx(octet, lastBits)
 				_ = n.eachSubnet(octets, depth, is4, idx, yield)
 				return
 			}
@@ -810,7 +835,16 @@ func (t *Table[V]) Subnets(pfx netip.Prefix) iter.Seq2[netip.Prefix, V] {
 	}
 }
 
-// OverlapsPrefix reports whether any IP in pfx is matched by a route in the table or vice versa.
+// OverlapsPrefix reports whether any route in the table overlaps with the given pfx or vice versa.
+//
+// The check is bidirectional: it returns true if the input prefix is covered by an existing
+// route, or if any stored route is itself contained within the input prefix.
+//
+// Internally, the function normalizes the prefix and descends the relevant trie branch,
+// using stride-based logic to identify overlap without performing a full lookup.
+//
+// This is useful for containment tests, route validation, or policy checks using prefix
+// semantics without retrieving exact matches.
 func (t *Table[V]) OverlapsPrefix(pfx netip.Prefix) bool {
 	if !pfx.IsValid() {
 		return false
@@ -825,14 +859,23 @@ func (t *Table[V]) OverlapsPrefix(pfx netip.Prefix) bool {
 	return n.overlapsPrefixAtDepth(pfx, 0)
 }
 
-// Overlaps reports whether any IP in the table is matched by a route in the
-// other table or vice versa.
+// Overlaps reports whether any route in the receiver table overlaps
+// with a route in the other table, in either direction.
+//
+// The overlap check is bidirectional: it returns true if any IP prefix
+// in the receiver is covered by the other table, or vice versa.
+// This includes partial overlaps, exact matches, and supernet/subnet relationships.
+//
+// Both IPv4 and IPv6 route trees are compared independently. If either
+// tree has overlapping routes, the function returns true.
+//
+// This is useful for conflict detection, policy enforcement,
+// or validating mutually exclusive routing domains.
 func (t *Table[V]) Overlaps(o *Table[V]) bool {
 	return t.Overlaps4(o) || t.Overlaps6(o)
 }
 
-// Overlaps4 reports whether any IPv4 in the table matches a route in the
-// other table or vice versa.
+// Overlaps4 is like [Table.Overlaps] but for the v4 routing table only.
 func (t *Table[V]) Overlaps4(o *Table[V]) bool {
 	if t.size4 == 0 || o.size4 == 0 {
 		return false
@@ -840,8 +883,7 @@ func (t *Table[V]) Overlaps4(o *Table[V]) bool {
 	return t.root4.overlaps(&o.root4, 0)
 }
 
-// Overlaps6 reports whether any IPv6 in the table matches a route in the
-// other table or vice versa.
+// Overlaps6 is like [Table.Overlaps] but for the v6 routing table only.
 func (t *Table[V]) Overlaps6(o *Table[V]) bool {
 	if t.size6 == 0 || o.size6 == 0 {
 		return false
@@ -849,21 +891,25 @@ func (t *Table[V]) Overlaps6(o *Table[V]) bool {
 	return t.root6.overlaps(&o.root6, 0)
 }
 
-// Union combines two tables, changing the receiver table.
-// If there are duplicate entries, the payload of type V is shallow copied from the other table.
-// If type V implements the [Cloner] interface, the values are cloned, see also [Table.Clone].
+// Union merges another routing table into the receiver table, modifying it in-place.
+//
+// All prefixes and values from the other table (o) are inserted into the receiver.
+// If a duplicate prefix exists in both tables, the value from o replaces the existing entry.
+// This duplicate is shallow-copied by default, but if the value type V implements the
+// Cloner interface, the value is deeply cloned before insertion. See also Table.Clone.
 func (t *Table[V]) Union(o *Table[V]) {
-	dup4 := t.root4.unionRec(&o.root4, 0)
-	dup6 := t.root6.unionRec(&o.root6, 0)
+	// Create a cloning function for deep copying values;
+	// returns nil if V does not implement the Cloner interface.
+	cloneFn := cloneFnFactory[V]()
+	if cloneFn == nil {
+		cloneFn = copyVal
+	}
+
+	dup4 := t.root4.unionRec(cloneFn, &o.root4, 0)
+	dup6 := t.root6.unionRec(cloneFn, &o.root6, 0)
 
 	t.size4 += o.size4 - dup4
 	t.size6 += o.size6 - dup6
-}
-
-// Cloner is an interface, if implemented by payload of type V the values are deeply copied
-// during [Table.UpdatePersist], [Table.DeletePersist], [Table.Clone] and [Table.Union].
-type Cloner[V any] interface {
-	Clone() V
 }
 
 // Clone returns a copy of the routing table.
@@ -876,8 +922,10 @@ func (t *Table[V]) Clone() *Table[V] {
 
 	c := new(Table[V])
 
-	c.root4 = *t.root4.cloneRec()
-	c.root6 = *t.root6.cloneRec()
+	cloneFn := cloneFnFactory[V]()
+
+	c.root4 = *t.root4.cloneRec(cloneFn)
+	c.root6 = *t.root6.cloneRec(cloneFn)
 
 	c.size4 = t.size4
 	c.size6 = t.size6
@@ -908,9 +956,20 @@ func (t *Table[V]) Size6() int {
 	return t.size6
 }
 
-// All returns an iterator over key-value pairs from Table. The iteration order
-// is not specified and is not guaranteed to be the same from one call to the
-// next.
+// All returns an iterator over all prefix–value pairs in the table.
+//
+// The entries from both IPv4 and IPv6 subtries are yielded using an internal recursive traversal.
+// The iteration order is unspecified and may vary between calls; for a stable order, use AllSorted.
+//
+// You can use All directly in a for-range loop without providing a yield function.
+// The Go compiler automatically synthesizes the yield callback for you:
+//
+//	for prefix, value := range t.All() {
+//	    fmt.Println(prefix, value)
+//	}
+//
+// Under the hood, the loop body is passed as a yield function to the iterator.
+// If you break or return from the loop, iteration stops early as expected.
 func (t *Table[V]) All() iter.Seq2[netip.Prefix, V] {
 	return func(yield func(netip.Prefix, V) bool) {
 		_ = t.root4.allRec(stridePath{}, 0, true, yield) && t.root6.allRec(stridePath{}, 0, false, yield)
@@ -931,7 +990,17 @@ func (t *Table[V]) All6() iter.Seq2[netip.Prefix, V] {
 	}
 }
 
-// AllSorted returns an iterator over key-value pairs from Table2 in natural CIDR sort order.
+// AllSorted returns an iterator over all prefix–value pairs in the table,
+// ordered in canonical CIDR prefix sort order.
+//
+// This can be used directly with a for-range loop; the Go compiler provides the yield function implicitly.
+//
+//	for prefix, value := range t.AllSorted() {
+//	    fmt.Println(prefix, value)
+//	}
+//
+// The traversal is stable and predictable across calls.
+// Iteration stops early if you break out of the loop.
 func (t *Table[V]) AllSorted() iter.Seq2[netip.Prefix, V] {
 	return func(yield func(netip.Prefix, V) bool) {
 		_ = t.root4.allRecSorted(stridePath{}, 0, true, yield) &&

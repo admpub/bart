@@ -15,134 +15,106 @@ import (
 // This is not a full [Table.Clone], all untouched nodes are still referenced
 // from both Tables.
 //
-// If the payload V is a pointer or contains a pointer, it should
-// implement the cloner interface.
+// If the payload type V contains pointers or needs deep copying,
+// it must implement the [bart.Cloner] interface to support correct cloning.
 //
-// This is orders of magnitude slower than Insert (μsec versus nsec).
+// This is orders of magnitude slower than Insert,
+// typically taking μsec instead of nsec.
 //
-// The bulk table load should be done with [Table.Insert] and then you can
-// use InsertPersist, [Table.UpdatePersist] and [Table.DeletePersist] for lock-free updates.
+// The bulk table load could be done with [Table.Insert] and then you can
+// use InsertPersist, [Table.UpdatePersist] and [Table.DeletePersist] for lock-free lookups.
 func (t *Table[V]) InsertPersist(pfx netip.Prefix, val V) *Table[V] {
 	if !pfx.IsValid() {
 		return t
 	}
 
-	pt := &Table[V]{
-		root4: t.root4,
-		root6: t.root6,
-		size4: t.size4,
-		size6: t.size6,
-	}
-
 	// canonicalize prefix
 	pfx = pfx.Masked()
 
-	is4 := pfx.Addr().Is4()
-
-	n := pt.rootNodeByVersion(is4)
-
-	// clone the root of insertion path
-	*n = *n.cloneFlat()
-
-	// clone nodes along the insertion path
-	if n.insertAtDepthPersist(pfx, val, 0) {
-		// prefix existed, no size increment
-		return pt
-	}
-
-	// true insert, update size
-	pt.sizeUpdate(is4, 1)
-
-	return pt
-}
-
-// UpdatePersist is similar to Update but the receiver isn't modified.
-//
-// All nodes touched during update are cloned and a new Table is returned.
-// This is not a full [Table.Clone], all untouched nodes are still referenced
-// from both Tables.
-//
-// If the payload V is a pointer or contains a pointer, it should
-// implement the cloner interface.
-//
-// This is orders of magnitude slower than Update (μsec versus nsec).
-func (t *Table[V]) UpdatePersist(pfx netip.Prefix, cb func(val V, ok bool) V) (pt *Table[V], newVal V) {
-	var zero V
-
-	if !pfx.IsValid() {
-		return t, zero
-	}
-
-	// canonicalize prefix
-	pfx = pfx.Masked()
-
-	// values derived from pfx
+	// Extract address, IP version, and prefix length.
 	ip := pfx.Addr()
 	is4 := ip.Is4()
 	bits := pfx.Bits()
 
-	pt = &Table[V]{
-		root4: t.root4,
-		root6: t.root6,
+	// share size counters; root nodes cloned selectively.
+	pt := &Table[V]{
 		size4: t.size4,
 		size6: t.size6,
 	}
 
-	n := pt.rootNodeByVersion(is4)
+	// Pointer to the root node we will modify in this operation.
+	var n *node[V]
 
-	// clone the root of insertion path
-	*n = *(n.cloneFlat())
+	// Create a cloning function for deep copying values;
+	// returns nil if V does not implement the Cloner interface.
+	cloneFn := cloneFnFactory[V]()
 
+	// Clone root node corresponding to the IP version, for copy-on-write.
+	if is4 {
+		pt.root6 = t.root6
+		pt.root4 = *t.root4.cloneFlat(cloneFn)
+
+		n = &pt.root4
+	} else {
+		pt.root4 = t.root4
+		pt.root6 = *t.root6.cloneFlat(cloneFn)
+
+		n = &pt.root6
+	}
+
+	// Prepare traversal info.
 	maxDepth, lastBits := maxDepthAndLastBits(bits)
-
 	octets := ip.AsSlice()
 
-	// find the proper trie node to update prefix
+	// Insert the prefix and value using the persist insert method that clones nodes
+	// along the path.
 	for depth, octet := range octets {
-		// last octet from prefix, update/insert prefix into node
+		// last masked octet: insert/override prefix/val into node
 		if depth == maxDepth {
-			newVal, exists := n.prefixes.UpdateAt(art.PfxToIdx256(octet, lastBits), cb)
+			exists := n.prefixes.InsertAt(art.PfxToIdx(octet, lastBits), val)
+			// If prefix did not previously exist, increment size counter.
 			if !exists {
 				pt.sizeUpdate(is4, 1)
 			}
-			return pt, newVal
+			return pt
 		}
 
-		addr := octet
-
-		// go down in tight loop to last octet
-		if !n.children.Test(addr) {
-			// insert prefix path compressed
-			newVal := cb(zero, false)
+		if !n.children.Test(octet) {
+			// insert prefix path compressed as leaf or fringe
 			if isFringe(depth, bits) {
-				n.children.InsertAt(addr, &fringeNode[V]{value: newVal})
+				n.children.InsertAt(octet, newFringeNode(val))
 			} else {
-				n.children.InsertAt(addr, &leafNode[V]{prefix: pfx, value: newVal})
+				n.children.InsertAt(octet, newLeafNode(pfx, val))
 			}
 
+			// New prefix addition path compressed, update size.
 			pt.sizeUpdate(is4, 1)
-			return pt, newVal
+			return pt
 		}
-		kid := n.children.MustGet(addr)
 
-		// kid is node or leaf at addr
+		kid := n.children.MustGet(octet)
+
+		// kid is node or leaf or fringe at octet
 		switch kid := kid.(type) {
 		case *node[V]:
-			// proceed to next level
-			kid = kid.cloneFlat()
-			n.children.InsertAt(addr, kid)
+			// clone the traversed path
+
+			// kid points now to cloned kid
+			kid = kid.cloneFlat(cloneFn)
+
+			// replace kid with clone
+			n.children.InsertAt(octet, kid)
+
 			n = kid
 			continue // descend down to next trie level
 
 		case *leafNode[V]:
-			kid = kid.cloneLeaf()
-
-			// update existing value if prefixes are equal
+			// reached a path compressed prefix
+			// override value in slot if prefixes are equal
 			if kid.prefix == pfx {
-				newVal = cb(kid.value, true)
-				n.children.InsertAt(addr, &leafNode[V]{prefix: pfx, value: newVal})
-
-				return pt, newVal
+				kid.value = val
+				// exists
+				return pt
 			}
 
 			// create new node
@@ -152,17 +124,16 @@ func (t *Table[V]) UpdatePersist(pfx netip.Prefix, cb func(val V, ok bool) V) (p
 			newNode := new(node[V])
 			newNode.insertAtDepth(kid.prefix, kid.value, depth+1)
 
-			n.children.InsertAt(addr, newNode)
+			n.children.InsertAt(octet, newNode)
 			n = newNode
 
 		case *fringeNode[V]:
-			kid = kid.cloneFringe()
-
-			// update existing value if prefix is fringe
+			// reached a path compressed fringe
+			// override value in slot if pfx is a fringe
 			if isFringe(depth, bits) {
-				newVal = cb(kid.value, true)
-				n.children.InsertAt(addr, &fringeNode[V]{value: newVal})
-				return pt, newVal
+				kid.value = val
+				// exists
+				return pt
 			}
 
 			// create new node
@@ -172,7 +143,7 @@ func (t *Table[V]) UpdatePersist(pfx netip.Prefix, cb func(val V, ok bool) V) (p
 			newNode := new(node[V])
 			newNode.prefixes.InsertAt(1, kid.value)
 
-			n.children.InsertAt(addr, newNode)
+			n.children.InsertAt(octet, newNode)
 			n = newNode
 
 		default:
@@ -180,30 +151,189 @@ func (t *Table[V]) UpdatePersist(pfx netip.Prefix, cb func(val V, ok bool) V) (p
 		}
 	}
 
+	// Should never happen: traversal always returns or panics inside loop.
 	panic("unreachable")
 }
 
-// DeletePersist is similar to Delete but the receiver isn't modified.
-// All nodes touched during delete are cloned and a new Table is returned.
+// UpdatePersist is similar to Update but does not modify the receiver.
 //
-// This is orders of magnitude slower than Delete (μsec versus nsec).
+// It performs a copy-on-write update, cloning all nodes touched during the update,
+// and returns a new Table instance reflecting the update.
+// Untouched nodes remain shared between the original and returned Tables.
+//
+// If the payload type V contains pointers or needs deep copying,
+// it must implement the [bart.Cloner] interface to support correct cloning.
+//
+// Due to cloning overhead, UpdatePersist is significantly slower than Update,
+// typically taking μsec instead of nsec.
+func (t *Table[V]) UpdatePersist(pfx netip.Prefix, cb func(val V, ok bool) V) (pt *Table[V], newVal V) {
+	var zero V // zero value of V for default initialization
+
+	if !pfx.IsValid() {
+		return t, zero
+	}
+
+	// canonicalize prefix
+	pfx = pfx.Masked()
+
+	// Extract address, version info and prefix length.
+	ip := pfx.Addr()
+	is4 := ip.Is4()
+	bits := pfx.Bits()
+
+	// share size counters; root nodes cloned selectively.
+	pt = &Table[V]{
+		size4: t.size4,
+		size6: t.size6,
+	}
+
+	// Pointer to the root node we will modify in this operation.
+	var n *node[V]
+
+	// Create a cloning function for deep copying values;
+	// returns nil if V does not implement the Cloner interface.
+	cloneFn := cloneFnFactory[V]()
+
+	// Clone root node corresponding to the IP version, for copy-on-write.
+	if is4 {
+		pt.root6 = t.root6
+		pt.root4 = *t.root4.cloneFlat(cloneFn)
+
+		n = &pt.root4
+	} else {
+		pt.root4 = t.root4
+		pt.root6 = *t.root6.cloneFlat(cloneFn)
+
+		n = &pt.root6
+	}
+
+	// Prepare traversal info.
+	maxDepth, lastBits := maxDepthAndLastBits(bits)
+	octets := ip.AsSlice()
+
+	// Traverse the trie by octets to find the node to update.
+	for depth, octet := range octets {
+		// If at the last relevant octet, update or insert the prefix in this node.
+		if depth == maxDepth {
+			newVal, exists := n.prefixes.UpdateAt(art.PfxToIdx(octet, lastBits), cb)
+			// If prefix did not previously exist, increment size counter.
+			if !exists {
+				pt.sizeUpdate(is4, 1)
+			}
+			return pt, newVal
+		}
+
+		addr := octet
+
+		// If child node for this address does not exist, insert new leaf or fringe.
+		if !n.children.Test(addr) {
+			newVal := cb(zero, false)
+			if isFringe(depth, bits) {
+				n.children.InsertAt(addr, newFringeNode(newVal))
+			} else {
+				n.children.InsertAt(addr, newLeafNode(pfx, newVal))
+			}
+
+			// New prefix addition updates size.
+			pt.sizeUpdate(is4, 1)
+			return pt, newVal
+		}
+
+		// Child exists - retrieve it.
+		kid := n.children.MustGet(addr)
+
+		// kid is node or leaf at addr
+		switch kid := kid.(type) {
+		case *node[V]:
+			// Clone the node along the traversed path to respect copy-on-write.
+			kid = kid.cloneFlat(cloneFn)
+
+			// Replace original child with the cloned child.
+			n.children.InsertAt(addr, kid)
+
+			// Descend into cloned child for further traversal.
+			n = kid
+			continue
+
+		case *leafNode[V]:
+			// If the leaf's prefix matches, update the value using callback.
+			if kid.prefix == pfx {
+				newVal = cb(kid.value, true)
+
+				// Replace the existing leaf with an updated one.
+				n.children.InsertAt(addr, newLeafNode(pfx, newVal))
+
+				return pt, newVal
+			}
+
+			// Prefixes differ - need to push existing leaf down the trie,
+			// create a new internal node, and insert the original leaf under it.
+			newNode := new(node[V])
+			newNode.insertAtDepth(kid.prefix, kid.value, depth+1)
+
+			// Replace leaf with new node and descend.
+			n.children.InsertAt(addr, newNode)
+			n = newNode
+
+		case *fringeNode[V]:
+			// If current node corresponds to a fringe prefix, update its value.
+			if isFringe(depth, bits) {
+				newVal = cb(kid.value, true)
+				// Replace fringe node with updated value.
+				n.children.InsertAt(addr, newFringeNode(newVal))
+				return pt, newVal
+			}
+
+			// Else convert fringe node into an internal node with fringe value
+			// pushed down as default route (idx=1).
+			newNode := new(node[V])
+			newNode.prefixes.InsertAt(1, kid.value)
+
+			// Replace fringe with newly created internal node and descend.
+			n.children.InsertAt(addr, newNode)
+			n = newNode
+
+		default:
+			// Unexpected node type indicates logic error.
+			panic("logic error, wrong node type")
+		}
+	}
+
+	// Should never reach here: the loop should always return or panic.
+	panic("unreachable")
+}
+
+// DeletePersist is similar to Delete but does not modify the receiver.
+//
+// It performs a copy-on-write delete operation, cloning all nodes touched during
+// deletion and returning a new Table reflecting the change.
+//
+// If the payload type V contains pointers or requires deep copying,
+// it must implement the [bart.Cloner] interface for correct cloning.
+//
+// Due to cloning overhead, DeletePersist is significantly slower than Delete,
+// typically taking μsec instead of nsec.
 func (t *Table[V]) DeletePersist(pfx netip.Prefix) *Table[V] {
 	pt, _, _ := t.getAndDeletePersist(pfx)
 	return pt
 }
 
-// GetAndDeletePersist is similar to GetAndDelete but the receiver isn't modified.
-// All nodes touched during delete are cloned and a new Table is returned.
+// GetAndDeletePersist is similar to GetAndDelete but does not modify the receiver.
 //
-// If the payload V is a pointer or contains a pointer, it should
-// implement the cloner interface.
+// It performs a copy-on-write delete operation, cloning all nodes touched during
+// deletion and returning a new Table reflecting the change.
 //
-// This is orders of magnitude slower than GetAndDelete (μsec versus nsec).
+// If the payload type V contains pointers or requires deep copying,
+// it must implement the [bart.Cloner] interface for correct cloning.
+//
+// Due to cloning overhead, GetAndDeletePersist is significantly slower than GetAndDelete,
+// typically taking μsec instead of nsec.
 func (t *Table[V]) GetAndDeletePersist(pfx netip.Prefix) (pt *Table[V], val V, ok bool) {
 	return t.getAndDeletePersist(pfx)
 }
 
-// getAndDeletePersist is similar to getAndDelete but the receiver isn't modified.
+// getAndDeletePersist is the internal implementation of GetAndDeletePersist,
+// performing the copy-on-write delete without modifying the receiver.
 func (t *Table[V]) getAndDeletePersist(pfx netip.Prefix) (pt *Table[V], val V, exists bool) {
 	if !pfx.IsValid() {
 		return t, val, false
@@ -212,105 +342,169 @@ func (t *Table[V]) getAndDeletePersist(pfx netip.Prefix) (pt *Table[V], val V, e
 	// canonicalize prefix
 	pfx = pfx.Masked()
 
-	// values derived from pfx
+	// Extract address, IP version, and prefix length.
 	ip := pfx.Addr()
 	is4 := ip.Is4()
 	bits := pfx.Bits()
 
+	// share size counters; root nodes cloned selectively.
 	pt = &Table[V]{
-		root4: t.root4,
-		root6: t.root6,
 		size4: t.size4,
 		size6: t.size6,
 	}
 
-	n := pt.rootNodeByVersion(is4)
+	// Pointer to the root node we will modify in this operation.
+	var n *node[V]
 
-	// clone the root of insertion path
-	*n = *n.cloneFlat()
+	// Create a cloning function for deep copying values;
+	// returns nil if V does not implement the Cloner interface.
+	cloneFn := cloneFnFactory[V]()
 
+	// Clone root node corresponding to the IP version, for copy-on-write.
+	if is4 {
+		pt.root6 = t.root6
+		pt.root4 = *t.root4.cloneFlat(cloneFn)
+
+		n = &pt.root4
+	} else {
+		pt.root4 = t.root4
+		pt.root6 = *t.root6.cloneFlat(cloneFn)
+
+		n = &pt.root6
+	}
+
+	// Prepare traversal context.
 	maxDepth, lastBits := maxDepthAndLastBits(bits)
-
 	octets := ip.AsSlice()
 
-	// record path to deleted node
-	// needed to purge and/or path compress nodes after deletion
+	// Stack to keep track of cloned nodes along the path,
+	// needed for purge and path compression after delete.
 	stack := [maxTreeDepth]*node[V]{}
 
-	// find the trie node
+	// Traverse the trie to locate the prefix to delete.
 	for depth, octet := range octets {
-		// push cloned node on stack for path recording
+		// Keep track of the cloned node at current depth.
 		stack[depth] = n
 
 		if depth == maxDepth {
-			// try to delete prefix in trie node
-			val, exists = n.prefixes.DeleteAt(art.PfxToIdx256(octet, lastBits))
+			// Attempt to delete the prefix from the node's prefixes.
+			val, exists = n.prefixes.DeleteAt(art.PfxToIdx(octet, lastBits))
 			if !exists {
-				// nothing to delete
+				// Prefix not found, nothing deleted.
 				return pt, val, false
 			}
 
+			// Adjust stored prefix count for deletion.
 			pt.sizeUpdate(is4, -1)
+
+			// After deletion, purge nodes and compress the path if needed.
 			n.purgeAndCompress(stack[:depth], octets, is4)
+
 			return pt, val, exists
 		}
 
 		addr := octet
+
+		// If child node doesn't exist, no prefix to delete.
 		if !n.children.Test(addr) {
-			// nothing to delete
 			return pt, val, false
 		}
+
+		// Fetch child node at current address.
 		kid := n.children.MustGet(addr)
 
-		// kid is node or leaf at addr
 		switch kid := kid.(type) {
 		case *node[V]:
-			// proceed to next level
-			kid = kid.cloneFlat()
+			// Clone the internal node for copy-on-write.
+			kid = kid.cloneFlat(cloneFn)
+
+			// Replace child with cloned node.
 			n.children.InsertAt(addr, kid)
+
+			// Descend to cloned child node.
 			n = kid
-			continue // descend down to next trie level
+			continue
 
 		case *fringeNode[V]:
-			kid = kid.cloneFringe()
-
-			// reached a path compressed fringe, stop traversing
+			// Reached a path compressed fringe.
 			if !isFringe(depth, bits) {
-				// nothing to delete
+				// Prefix to delete not found here.
 				return pt, val, false
 			}
 
-			// prefix is equal fringe, delete fringe
+			// Delete the fringe node.
 			n.children.DeleteAt(addr)
 
+			// Update size to reflect deletion.
 			pt.sizeUpdate(is4, -1)
+
+			// Purge and compress affected path.
 			n.purgeAndCompress(stack[:depth], octets, is4)
 
-			// kid.value is cloned
 			return pt, kid.value, true
 
 		case *leafNode[V]:
-			kid = kid.cloneLeaf()
-
-			// reached a path compressed prefix, stop traversing
+			// Reached a path compressed leaf node.
 			if kid.prefix != pfx {
-				// nothing to delete
+				// Leaf prefix does not match; nothing to delete.
 				return pt, val, false
 			}
 
-			// prefix is equal leaf, delete leaf
+			// Delete leaf node.
 			n.children.DeleteAt(addr)
 
+			// Update size to reflect deletion.
 			pt.sizeUpdate(is4, -1)
+
+			// Purge and compress affected path.
 			n.purgeAndCompress(stack[:depth], octets, is4)
 
-			// kid.value is cloned
 			return pt, kid.value, true
 
 		default:
+			// Unexpected node type indicates a logic error.
 			panic("logic error, wrong node type")
 		}
 	}
 
+	// Should never happen: traversal always returns or panics inside loop.
 	panic("unreachable")
+}
+
+// UnionPersist is similar to [Union] but the receiver isn't modified.
+//
+// All nodes touched during union are cloned and a new Table is returned.
+func (t *Table[V]) UnionPersist(o *Table[V]) *Table[V] {
+	// Create a cloning function for deep copying values;
+	// returns nil if V does not implement the Cloner interface.
+	cloneFn := cloneFnFactory[V]()
+
+	// new Table with root nodes just copied.
+	pt := &Table[V]{
+		root4: t.root4,
+		root6: t.root6,
+		//
+		size4: t.size4,
+		size6: t.size6,
+	}
+
+	// only clone the root node if there is something to union
+	if o.size4 != 0 {
+		pt.root4 = *t.root4.cloneFlat(cloneFn)
+	}
+	if o.size6 != 0 {
+		pt.root6 = *t.root6.cloneFlat(cloneFn)
+	}
+
+	if cloneFn == nil {
+		cloneFn = copyVal
+	}
+
+	dup4 := pt.root4.unionRecPersist(cloneFn, &o.root4, 0)
+	dup6 := pt.root6.unionRecPersist(cloneFn, &o.root6, 0)
+
+	pt.size4 += o.size4 - dup4
+	pt.size6 += o.size6 - dup6
+
+	return pt
 }

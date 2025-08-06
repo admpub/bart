@@ -11,13 +11,13 @@
 
 ## Overview
 
-`package bart` provides a Balanced-Routing-Table (BART).
+`package bart` provides a Balanced-Routing-Table (BART) for very fast IP to CIDR lookups and more.
 
 BART is balanced in terms of memory usage and lookup time for the longest-prefix
 match.
 
 BART is a multibit-trie with fixed stride length of 8 bits, using a fast mapping
-function (taken from the ART algorithm) to map the 256 prefixes in each level
+function (based on Donald E. Knuths ART algorithm) to map the 256 prefixes in each level
 node to form a complete-binary-tree.
 
 This complete binary tree is implemented with popcount compressed sparse arrays
@@ -29,6 +29,9 @@ The BART algorithm is based on fixed size bit vectors and precalculated
 lookup tables. The lookup is performed entirely by fast,
 cache-friendly bitmask operations, which in modern CPUs are performed
 by advanced bit manipulation instruction sets (POPCNT, LZCNT, TZCNT, ...).
+
+You should specify the CPU feature set when compiling, e.g. GOAMD64=v3 for 
+maximum performance, see also https://go.dev/wiki/MinimumRequirements#architectures
 
 The algorithm was specially developed so that it can always work with a fixed
 length of 256 bits. This means that the bitset fit very well in a cache line and
@@ -43,65 +46,27 @@ func (b *BitSet256) popcnt() (cnt int) {
 	return
 }
 ```
+A future Go version that supports SIMD intrinsics for the `[4]uint64` vectors will
+probably allow the algorithm to be made even faster on suitable hardware.
 
 The BART algorithm is also excellent for determining whether two tables
 contain overlapping IP addresses, just in a few nanoseconds.
 
-A `bart.Lite` wrapper is included, this is ideal for simple IP
-ACLs (access-control-lists) with plain true/false results and no payload.
+## lock-free concurrency
 
-## Example
+There are examples demonstrating how to use bart concurrently with multiple readers and writers.
+Readers can access the table always lock-free, while writers may synchronize using a mutex to ensure
+that only one writer can modify the table persistent at a time, not using Compare-and-Swap (CAS)
+with all the known problems for multiple long-running writers.
 
-```golang
-func ExampleLite_Contains() {
-	lite := new(bart.Lite)
+The combination of lock-free concurrency, fast lookup and update times and low memory consumption
+provides clear advantages for any routing daemon.
 
-	// Insert some prefixes
-	prefixes := []string{
-		"192.168.0.0/16",
-		"192.168.1.0/24",
-		"2001:7c0:3100::/40",
-		"2001:7c0:3100:1::/64",
-		"fc00::/7",
-	}
+But as always, it depends on the specific use case.
 
-	for _, s := range prefixes {
-		pfx := netip.MustParsePrefix(s)
-		lite.Insert(pfx)
-	}
+See the `ExampleLite_concurrent` and `ExampleTable_concurrent` tests for concrete examples of this pattern.
 
-	// Test some IP addresses for black/whitelist containment
-	ips := []string{
-		"192.168.1.100",      // must match
-		"192.168.2.1",        // must match
-		"2001:7c0:3100:1::1", // must match
-		"2001:7c0:3100:2::1", // must match
-		"fc00::1",            // must match
-		//
-		"172.16.0.1",        // must NOT match
-		"2003:dead:beef::1", // must NOT match
-	}
-
-	for _, s := range ips {
-		ip := netip.MustParseAddr(s)
-		ok := lite.Contains(ip)
-		fmt.Printf("%-20s is contained: %t\n", ip, ok)
-	}
-
-	// Output:
-	// 192.168.1.100        is contained: true
-	// 192.168.2.1          is contained: true
-	// 2001:7c0:3100:1::1   is contained: true
-	// 2001:7c0:3100:2::1   is contained: true
-	// fc00::1              is contained: true
-	// 172.16.0.1           is contained: false
-	// 2003:dead:beef::1    is contained: false
-}
-```
 ## API
-
-From release v0.18.x on, bart requires at least go1.23, the `iter.Seq2[netip.Prefix, V]` types for iterators
-are used. The lock-free versions of insert, update and delete are added, but still experimental.
 
 ```golang
   import "github.com/gaissmai/bart"
@@ -109,15 +74,6 @@ are used. The lock-free versions of insert, update and delete are added, but sti
   type Table[V any] struct {
   	// Has unexported fields.
   }
-    // Table is an IPv4 and IPv6 routing table with payload V. The zero value is
-    // ready to use.
-
-    // The Table is safe for concurrent readers but not for concurrent readers
-    // and/or writers. Either the update operations must be protected by an
-    // external lock mechanism or the various ...Persist functions must be used
-    // which return a modified routing table by leaving the original unchanged
-
-    // A Table must not be copied by value.
 
   func (t *Table[V]) Contains(ip netip.Addr) bool
   func (t *Table[V]) Lookup(ip netip.Addr) (val V, ok bool)
@@ -137,8 +93,9 @@ are used. The lock-free versions of insert, update and delete are added, but sti
   func (t *Table[V]) GetAndDelete(pfx netip.Prefix) (val V, ok bool)
   func (t *Table[V]) GetAndDeletePersist(pfx netip.Prefix) (pt *Table[V], val V, ok bool)
 
-  func (t *Table[V]) Union(o *Table[V])
   func (t *Table[V]) Clone() *Table[V]
+  func (t *Table[V]) Union(o *Table[V])
+  func (t *Table[V]) UnionPersist(o *Table[V]) *Table[V]
 
   func (t *Table[V]) OverlapsPrefix(pfx netip.Prefix) bool
 
@@ -170,6 +127,38 @@ are used. The lock-free versions of insert, update and delete are added, but sti
   func (t *Table[V]) DumpList6() []DumpListNode[V]
 ```
 
+A `bart.Lite` wrapper is also included, this is ideal for simple IP
+ACLs (access-control-lists) with plain true/false results and no payload.
+Lite is just a convenience wrapper for Table, instantiated with an empty
+struct as payload.
+
+Lite wraps or adapts some methods where needed and delegates almost all
+other methods unmodified to the underlying Table.
+Some delegated methods are pointless without a payload.
+
+```golang
+   type Lite struct {
+     Table[struct{}]
+   }
+
+   func (l *Lite) Exists(pfx netip.Prefix) bool
+   func (l *Lite) Contains(pfx netip.Prefix) bool
+
+   func (l *Lite) Insert(pfx netip.Prefix)
+   func (l *Lite) Delete(pfx netip.Prefix)
+
+   func (l *Lite) InsertPersist(pfx netip.Prefix) *Lite
+   func (l *Lite) DeletePersist(pfx netip.Prefix) *Lite
+
+   func (l *Lite) Clone() *Lite
+   func (l *Lite) Union(o *Lite)
+   func (l *Lite) UnionPersist(o *Lite) *Lite
+
+   func (l *Lite) Overlaps(o *Lite) bool
+   func (l *Lite) Overlaps4(o *Lite) bool
+   func (l *Lite) Overlaps6(o *Lite) bool
+```
+
 ## benchmarks
 
 Please see the extensive [benchmarks](https://github.com/gaissmai/iprbench) comparing `bart` with other IP routing table implementations.
@@ -178,23 +167,25 @@ Just a teaser, `Contains` and `Lookup` against the Tier1 full Internet routing t
 random IP address probes:
 
 ```
+$ GOAMD64=v3 go test -run=xxx -bench=FullM/Contains -cpu=1
 goos: linux
 goarch: amd64
 pkg: github.com/gaissmai/bart
 cpu: Intel(R) Core(TM) i5-8250U CPU @ 1.60GHz
-BenchmarkFullMatch4/Contains        129756907	         8.409 ns/op
-BenchmarkFullMatch6/Contains        96855786	        11.72 ns/op
-BenchmarkFullMiss4/Contains         56269990	        18.58 ns/op
-BenchmarkFullMiss6/Contains         131779195	        10.08 ns/op
+BenchmarkFullMatch4/Contains        82013714	        13.59 ns/op
+BenchmarkFullMatch6/Contains        64516006	        18.66 ns/op
+BenchmarkFullMiss4/Contains         75341578	        15.94 ns/op
+BenchmarkFullMiss6/Contains         148116180	         8.122 ns/op
 
+$ GOAMD64=v3 go test -run=xxx -bench=FullM/Lookup -skip=/x -cpu=1
 goos: linux
 goarch: amd64
 pkg: github.com/gaissmai/bart
 cpu: Intel(R) Core(TM) i5-8250U CPU @ 1.60GHz
-BenchmarkFullMatch4/Lookup         	47039798	        24.44 ns/op
-BenchmarkFullMatch6/Lookup         	81769753	        13.61 ns/op
-BenchmarkFullMiss4/Lookup          	51986374	        22.72 ns/op
-BenchmarkFullMiss6/Lookup          	100000000	        11.47 ns/op
+BenchmarkFullMatch4/Lookup         	54616323	        22.02 ns/op
+BenchmarkFullMatch6/Lookup         	30073657	        39.98 ns/op
+BenchmarkFullMiss4/Lookup          	55132899	        21.90 ns/op
+BenchmarkFullMiss6/Lookup          	100000000	        11.12 ns/op
 ```
 
 ## Compatibility Guarantees
