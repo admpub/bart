@@ -1,5 +1,3 @@
 module github.com/admpub/bart
 
 go 1.24.0
-
-retract v0.20.5 // introduced a bug in InsertPersist
