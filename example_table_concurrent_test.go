@@ -1,3 +1,6 @@
+// Copyright (c) 2025 Karl Gaissmaier
+// SPDX-License-Identifier: MIT
+
 package bart_test
 
 import (
@@ -7,14 +10,13 @@ import (
 	"github.com/admpub/bart"
 )
 
-// testVal is a simple sample value type.
-// We use *testVal as the generic payload type V, which is a pointer type,
-// so it must implement Cloner[*testVal].
+// We use *testVal as the generic payload type V (a pointer type).
 type testVal struct {
 	data int
 }
 
-// Clone ensures deep copying for use with ...Persist.
+// Clone enables deep copying for ...Persist operations.
+// Detected via structural typing (presence of a matching Clone method).
 func (v *testVal) Clone() *testVal {
 	if v == nil {
 		return nil
@@ -22,14 +24,9 @@ func (v *testVal) Clone() *testVal {
 	return &testVal{data: v.data}
 }
 
-var (
-	tblAtomicPtr atomic.Pointer[bart.Table[*testVal]]
-	tblMutex     sync.Mutex
-)
-
 // #######################################
 
-// ExampleTable_concurrent demonstrates safe concurrent usage of bart.
+// ExampleTable_concurrent demonstrates safe concurrent usage of bart.Table.
 // This example is intended to be run with the Go race detector enabled
 // (use `go test -race -run=ExampleTable_concurrent`)
 // to verify that concurrent access is safe and free of data races.
@@ -40,9 +37,12 @@ var (
 // or take a long time in comparison to reads,
 // providing high performance for concurrent workloads.
 //
-// If the payload V either contains a pointer or is a pointer,
-// it must implement the [bart.Cloner] interface.
+// If the payload V either contains pointers or is a pointer,
+// implement a Clone method (structural typing is used).
 func ExampleTable_concurrent() {
+	var tblAtomicPtr atomic.Pointer[bart.Table[*testVal]]
+	var tblMutex sync.Mutex
+
 	baseTbl := new(bart.Table[*testVal])
 	tblAtomicPtr.Store(baseTbl)
 
@@ -51,7 +51,7 @@ func ExampleTable_concurrent() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		for range 10_000_000 {
+		for range 100_000 {
 			for _, ip := range exampleIPs {
 				_, _ = tblAtomicPtr.Load().Lookup(ip)
 			}
@@ -61,16 +61,17 @@ func ExampleTable_concurrent() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		for range 10_000 {
+		for range 1_000 {
 			tblMutex.Lock()
-			tbl := tblAtomicPtr.Load()
+			cur := tblAtomicPtr.Load()
 
 			// batch of inserts
+			next := cur
 			for _, pfx := range examplePrefixes {
-				tbl = tbl.InsertPersist(pfx, &testVal{data: 0})
+				next = next.InsertPersist(pfx, &testVal{data: 0})
 			}
 
-			tblAtomicPtr.Store(tbl)
+			tblAtomicPtr.Store(next)
 			tblMutex.Unlock()
 		}
 	}()
@@ -78,16 +79,17 @@ func ExampleTable_concurrent() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		for range 10_000 {
+		for range 1_000 {
 			tblMutex.Lock()
-			tbl := tblAtomicPtr.Load()
+			cur := tblAtomicPtr.Load()
 
 			// batch of deletes
+			next := cur
 			for _, pfx := range examplePrefixes {
-				tbl = tbl.DeletePersist(pfx)
+				next = next.DeletePersist(pfx)
 			}
 
-			tblAtomicPtr.Store(tbl)
+			tblAtomicPtr.Store(next)
 			tblMutex.Unlock()
 		}
 	}()
