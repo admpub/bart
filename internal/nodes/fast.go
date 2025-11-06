@@ -6,9 +6,9 @@ package nodes
 import (
 	"iter"
 
-	"github.com/gaissmai/bart/internal/bitset"
-	"github.com/gaissmai/bart/internal/lpm"
-	"github.com/gaissmai/bart/internal/value"
+	"github.com/admpub/bart/internal/bitset"
+	"github.com/admpub/bart/internal/lpm"
+	"github.com/admpub/bart/internal/value"
 )
 
 // FastNode is a trie level node in the multibit routing table.

@@ -9,9 +9,9 @@ import (
 	"net/netip"
 	"sync"
 
-	"github.com/gaissmai/bart/internal/art"
-	"github.com/gaissmai/bart/internal/lpm"
-	"github.com/gaissmai/bart/internal/nodes"
+	"github.com/admpub/bart/internal/art"
+	"github.com/admpub/bart/internal/lpm"
+	"github.com/admpub/bart/internal/nodes"
 )
 
 // Lite follows the BART design but with no payload.

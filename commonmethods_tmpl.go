@@ -22,8 +22,8 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/gaissmai/bart/internal/nodes"
-	"github.com/gaissmai/bart/internal/value"
+	"github.com/admpub/bart/internal/nodes"
+	"github.com/admpub/bart/internal/value"
 )
 
 type _NODE_TYPE[V any] struct{}

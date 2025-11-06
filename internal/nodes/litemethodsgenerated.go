@@ -12,9 +12,9 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/gaissmai/bart/internal/allot"
-	"github.com/gaissmai/bart/internal/art"
-	"github.com/gaissmai/bart/internal/value"
+	"github.com/admpub/bart/internal/allot"
+	"github.com/admpub/bart/internal/art"
+	"github.com/admpub/bart/internal/value"
 )
 
 // Insert inserts a network prefix and its associated value into the

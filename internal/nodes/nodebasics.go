@@ -10,8 +10,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/gaissmai/bart/internal/art"
-	"github.com/gaissmai/bart/internal/value"
+	"github.com/admpub/bart/internal/art"
+	"github.com/admpub/bart/internal/value"
 )
 
 // strideLen represents the byte stride length for the multibit trie.

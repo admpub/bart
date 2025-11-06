@@ -22,9 +22,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gaissmai/bart/internal/tests/golden"
-	"github.com/gaissmai/bart/internal/tests/random"
-	"github.com/gaissmai/bart/internal/value"
+	"github.com/admpub/bart/internal/tests/golden"
+	"github.com/admpub/bart/internal/tests/random"
+	"github.com/admpub/bart/internal/value"
 )
 
 type _NODE_TYPE[V any] struct{}

@@ -8,8 +8,8 @@ import (
 	"net/netip"
 	"testing"
 
-	"github.com/gaissmai/bart/internal/art"
-	"github.com/gaissmai/bart/internal/value"
+	"github.com/admpub/bart/internal/art"
+	"github.com/admpub/bart/internal/value"
 )
 
 // helpers

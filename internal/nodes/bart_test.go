@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gaissmai/bart/internal/art"
+	"github.com/admpub/bart/internal/art"
 )
 
 func TestBartNode_EmptyState(t *testing.T) {

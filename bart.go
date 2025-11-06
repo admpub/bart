@@ -7,9 +7,9 @@ import (
 	"net/netip"
 	"sync"
 
-	"github.com/gaissmai/bart/internal/art"
-	"github.com/gaissmai/bart/internal/lpm"
-	"github.com/gaissmai/bart/internal/nodes"
+	"github.com/admpub/bart/internal/art"
+	"github.com/admpub/bart/internal/lpm"
+	"github.com/admpub/bart/internal/nodes"
 )
 
 // Table represents an IPv4 and IPv6 routing table with payload V.

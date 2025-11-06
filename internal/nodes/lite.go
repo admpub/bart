@@ -6,10 +6,10 @@ package nodes
 import (
 	"iter"
 
-	"github.com/gaissmai/bart/internal/bitset"
-	"github.com/gaissmai/bart/internal/lpm"
-	"github.com/gaissmai/bart/internal/sparse"
-	"github.com/gaissmai/bart/internal/value"
+	"github.com/admpub/bart/internal/bitset"
+	"github.com/admpub/bart/internal/lpm"
+	"github.com/admpub/bart/internal/sparse"
+	"github.com/admpub/bart/internal/value"
 )
 
 // LiteNode is a trie level node in the multibit routing table.

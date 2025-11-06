@@ -11,8 +11,8 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/gaissmai/bart/internal/nodes"
-	"github.com/gaissmai/bart/internal/tests/random"
+	"github.com/admpub/bart/internal/nodes"
+	"github.com/admpub/bart/internal/tests/random"
 )
 
 // roundFloat64 to 2 decimal places

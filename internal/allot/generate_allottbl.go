@@ -24,7 +24,7 @@ import (
 	"strings"
 	"text/template"
 
-	"github.com/gaissmai/bart/internal/bitset"
+	"github.com/admpub/bart/internal/bitset"
 )
 
 var (

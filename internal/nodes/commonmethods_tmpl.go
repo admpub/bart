@@ -20,10 +20,10 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/gaissmai/bart/internal/allot"
-	"github.com/gaissmai/bart/internal/art"
-	"github.com/gaissmai/bart/internal/bitset"
-	"github.com/gaissmai/bart/internal/value"
+	"github.com/admpub/bart/internal/allot"
+	"github.com/admpub/bart/internal/art"
+	"github.com/admpub/bart/internal/bitset"
+	"github.com/admpub/bart/internal/value"
 )
 
 type _NODE_TYPE[V any] struct {

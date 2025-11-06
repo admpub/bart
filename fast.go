@@ -7,9 +7,9 @@ import (
 	"net/netip"
 	"sync"
 
-	"github.com/gaissmai/bart/internal/art"
-	"github.com/gaissmai/bart/internal/nodes"
-	"github.com/gaissmai/bart/internal/value"
+	"github.com/admpub/bart/internal/art"
+	"github.com/admpub/bart/internal/nodes"
+	"github.com/admpub/bart/internal/value"
 )
 
 // Fast follows the ART design by Knuth in using fixed arrays at each level

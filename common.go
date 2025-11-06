@@ -40,11 +40,11 @@ package bart
 import (
 	"net/netip"
 
-	"github.com/gaissmai/bart/internal/nodes"
+	"github.com/admpub/bart/internal/nodes"
 
 	// inlining hint, see also the TestInlineBitSet256Functions.
 	// without this silent import the BitSet256 functions are not inlined
-	_ "github.com/gaissmai/bart/internal/bitset"
+	_ "github.com/admpub/bart/internal/bitset"
 )
 
 // stridePath is required in many places in the bart package and in

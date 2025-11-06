@@ -8,7 +8,7 @@
 // can be replaced by a fast bitset operation.
 package lpm
 
-import "github.com/gaissmai/bart/internal/bitset"
+import "github.com/admpub/bart/internal/bitset"
 
 // LookupTbl is a precomputed read‑only table used in hot paths.
 //

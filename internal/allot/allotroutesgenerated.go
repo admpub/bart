@@ -5,7 +5,7 @@
 
 package allot
 
-import "github.com/gaissmai/bart/internal/bitset"
+import "github.com/admpub/bart/internal/bitset"
 
 // PfxRoutesLookupTbl is a lookup table of BitSet256 entries.
 //
